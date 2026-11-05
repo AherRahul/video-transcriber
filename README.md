@@ -263,6 +263,26 @@ a minute). After that it is loaded from
 
 Transcripts are kept only while the server runs. Download anything you want to keep.
 
+### The video prompt
+
+Under every finished transcript there is a **Video prompt**: the prompt that asks Claude to build an
+AlgoInsight daily-series video from this video, written as soon as the transcript is ready. Paste it to
+Claude as it is (**Copy prompt**) or save it (**.md**).
+
+- **The details** at the top (topic, language, length, episode, stop for an OK after the script,
+  anything special) fill in the prompt's first lines. The language, the length and the two
+  transcript ticks are remembered for the next video.
+- **Short forms and how to say them** lists every short form in the transcript (CI/CD, API, YAML,
+  GitHub, K8s...) with how the voice should say it: letters joined by hyphens (C-I C-D), a word
+  (YAML is "yammel") or the name as written (GitHub). Short forms that auto-captions of Hindi videos
+  write in Hindi letters are found too (सीआईसीडी is CI/CD, एपीआई is API). A guess worth a second look
+  is marked **check**. Untick a row to leave it out, edit what is written or said, or **Add a short
+  form** of your own. They go into the prompt's section 4, which also tells Claude how to check each
+  one against the speech lexicon.
+- **Put the transcript in the prompt** adds the transcript at the end, so one paste does it all.
+
+Nothing leaves your computer: the prompt is written in the page.
+
 ---
 
 ## 6. Speech models: speed and accuracy
@@ -400,9 +420,12 @@ Invoke-RestMethod "http://127.0.0.1:8765/api/jobs/$($job.id)"
 | `backend/transcriber.py` | `transcribe_url()` runs the whole flow: `fetch_info` → `fetch_captions` (picks the track, reads json3 / VTT / SRT, follows HLS caption playlists, removes rolling repeats) → `download_audio` → `decode_audio` (FFmpeg) → `run_whisper`. Also friendly error messages and the `to_txt` / `to_srt` / `to_vtt` formats. |
 | `backend/app.py` | FastAPI: the job queue (one worker thread, jobs in memory, at most 50 kept), the endpoints, and serving `frontend/dist`. |
 | `backend/test_transcriber.py` | Offline unit tests. |
-| `frontend/src/App.tsx` | The page: form, options, progress, transcript, search, copy and download. |
+| `frontend/src/App.tsx` | The page: form, options, progress, transcript, search, copy and download, and the video prompt under a transcript. |
 | `frontend/src/api.ts` | Calls to the server. |
 | `frontend/src/format.ts` | Time format, paragraph grouping, "open the video at this time" links. |
+| `frontend/src/PromptPanel.tsx` | The video prompt under a transcript: its details, the short forms table, copy and download. |
+| `frontend/src/videoPrompt.ts` | The prompt itself: the standing instructions, filled in with the video's details, its short forms and the transcript. |
+| `frontend/src/shortForms.ts` | Finds short forms (Latin letters, and English letters written in Hindi) and suggests how each is said. |
 | `frontend/src/styles.css` | Light and dark theme (follows the system setting), phone layout. |
 
 ### Settings
