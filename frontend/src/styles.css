@@ -378,6 +378,123 @@ mark {
   border-radius: 2px;
 }
 
+/* ── The video prompt ───────────────────────────────────────────── */
+
+textarea {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 12px;
+  resize: vertical;
+}
+
+textarea:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.prompt h2,
+.prompt h3 {
+  margin: 0;
+}
+
+.prompt h3 {
+  font-size: 1rem;
+}
+
+.prompt-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.prompt-grid .wide,
+.prompt-grid .check {
+  grid-column: 1 / -1;
+}
+
+.forms-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.prompt > p {
+  margin: 0;
+}
+
+.forms {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.forms-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) minmax(0, 1.4fr) 110px;
+  gap: 8px;
+  align-items: center;
+}
+
+.forms-labels {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.forms-off input[type="text"] {
+  opacity: 0.5;
+}
+
+.chip-check {
+  margin-left: 6px;
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.btn-small {
+  align-self: flex-start;
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
+.prompt-preview textarea {
+  font: 0.82rem/1.5 ui-monospace, Consolas, monospace;
+  white-space: pre;
+  overflow: auto;
+}
+
+@media (max-width: 640px) {
+  .prompt-grid {
+    grid-template-columns: 1fr;
+  }
+  .forms-row {
+    grid-template-columns: 28px minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .forms-row > :last-child {
+    grid-column: 2 / -1;
+  }
+  /* on a phone the count sits under its row, so the header has no column for it */
+  .forms-labels > :last-child {
+    display: none;
+  }
+  .forms-head {
+    flex-direction: column;
+  }
+}
+
 @media (max-width: 640px) {
   .page {
     padding-top: 20px;

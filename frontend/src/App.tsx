@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } 
 
 import { downloadUrl, getHealth, getJob, startJob, type Health, type Job } from "./api";
 import { clock, linkAt, paragraphs, plainText, SOURCE_HINT, SOURCE_LABEL } from "./format";
+import PromptPanel from "./PromptPanel";
 
 const MODEL_HINT: Record<string, string> = {
   tiny: "Fastest, least accurate",
@@ -161,6 +162,8 @@ export default function App() {
 
       {job && job.state !== "done" ? <JobStatus job={job} onRetry={() => setJob(null)} /> : null}
       {job?.state === "done" && job.transcript ? <TranscriptView job={job} /> : null}
+      {/* the prompt that builds a video from this transcript, written as soon as the transcript is ready */}
+      {job?.state === "done" && job.transcript ? <PromptPanel key={job.id} transcript={job.transcript} /> : null}
     </div>
   );
 }
