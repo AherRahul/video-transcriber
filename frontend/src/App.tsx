@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } 
 
 import { downloadUrl, getHealth, getJob, startJob, type Health, type Job } from "./api";
 import { clock, linkAt, paragraphs, plainText, SOURCE_HINT, SOURCE_LABEL } from "./format";
+import { motionApi, saveDraft } from "./motion/api";
+import MotionApp from "./motion/MotionApp";
 import PromptPanel from "./PromptPanel";
 
 const MODEL_HINT: Record<string, string> = {
@@ -21,7 +23,42 @@ const STAGE_LABEL: Record<string, string> = {
   transcribing: "Turning speech into text",
 };
 
+/** The address after # picks the screen: #/ the transcriber, #/motion the Motion library, #/motion/<id> a video. */
+function useHashRoute(): [string, (hash: string) => void] {
+  const [hash, setHash] = useState(() => window.location.hash || "#/");
+  useEffect(() => {
+    const onChange = () => setHash(window.location.hash || "#/");
+    window.addEventListener("hashchange", onChange);
+    return () => window.removeEventListener("hashchange", onChange);
+  }, []);
+  return [hash, (h: string) => (window.location.hash = h)];
+}
+
 export default function App() {
+  const [hash, navigate] = useHashRoute();
+  const motion = hash.startsWith("#/motion");
+  const projectId = motion ? (hash.match(/^#\/motion\/([a-z0-9]+)/)?.[1] ?? null) : null;
+  return (
+    <>
+      <nav className="topnav" aria-label="Sections">
+        <span className="topnav-brand">Video Transcriber</span>
+        <a href="#/" className={!motion ? "on" : ""} aria-current={!motion ? "page" : undefined}>
+          Transcribe
+        </a>
+        <a href="#/motion" className={motion ? "on" : ""} aria-current={motion ? "page" : undefined}>
+          Motion
+        </a>
+      </nav>
+      {/* the transcriber stays mounted, so a running transcription survives a look at Motion */}
+      <div hidden={motion}>
+        <Transcriber />
+      </div>
+      {motion ? <MotionApp projectId={projectId} navigate={navigate} /> : null}
+    </>
+  );
+}
+
+function Transcriber() {
   const [health, setHealth] = useState<Health | null>(null);
   const [healthError, setHealthError] = useState(false);
   const [url, setUrl] = useState("");
@@ -137,7 +174,8 @@ export default function App() {
               <select value={model} onChange={(e) => setModel(e.target.value)} disabled={busy}>
                 {(health?.models ?? ["tiny", "base", "small", "medium"]).map((m) => (
                   <option key={m} value={m}>
-                    {m} — {MODEL_HINT[m] ?? ""}
+                    {m}
+                    {MODEL_HINT[m] ? ` - ${MODEL_HINT[m]}` : ""}
                   </option>
                 ))}
               </select>
@@ -209,7 +247,35 @@ function TranscriptView({ job }: { job: Job }) {
   const [timestamps, setTimestamps] = useState(true);
   const [query, setQuery] = useState("");
   const [copied, setCopied] = useState(false);
+  const [making, setMaking] = useState(false);
   const copyTimer = useRef<number | undefined>(undefined);
+
+  /** A new Motion video with this transcript attached, and a first message ready to send. */
+  async function makeVideo() {
+    setMaking(true);
+    try {
+      // the daily films' look and voice, as long as the source (the transcript's own length)
+      const { project, attachments } = await motionApi.createProject({
+        title: t.title,
+        sourceText: plainText(t, true),
+        sourceTitle: t.title,
+        sourceUrl: t.url,
+        brandKitId: "algoinsight-paper",
+        aspect: "16:9",
+        // the daily films run 10 to 30 minutes: a shorter source still makes a 10 minute film
+        targetSeconds: t.duration ? Math.min(1800, Math.max(600, t.duration)) : undefined,
+      });
+      saveDraft(project.id, {
+        text: "Make a narrated explainer in our daily paper look from the attached transcript. Teach every point it covers, but build our own version: our own running story and examples, our own sentences, a systematic order, simple and easy English in a warm human voice, every fact checked in FACTS.md. The script first, then every scene, then the YouTube details.",
+        attachments,
+      });
+      window.location.hash = `#/motion/${project.id}`;
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMaking(false);
+    }
+  }
 
   const paras = useMemo(() => paragraphs(t), [t]);
   const q = query.trim().toLowerCase();
@@ -258,6 +324,9 @@ function TranscriptView({ job }: { job: Job }) {
           <a className="btn" href={downloadUrl(job.id, "vtt", true)}>
             .vtt
           </a>
+          <button type="button" className="btn" onClick={() => void makeVideo()} disabled={making} title="Start a Motion video with this transcript attached">
+            {making ? "Opening…" : "Make a Motion video"}
+          </button>
         </div>
       </div>
 

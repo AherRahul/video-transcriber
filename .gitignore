@@ -3,3 +3,6 @@ backend/__pycache__/
 frontend/node_modules/
 frontend/dist/
 *.part
+motion-data/
+backend/.env
+__pycache__/

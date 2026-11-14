@@ -1,0 +1,1980 @@
+/* Motion: the library, the editor (chat, preview, scene strip, properties), menus and the brand kit
+   dialog. Uses the app's colour tokens from styles.css, so it follows the light and dark themes. */
+
+/* ── library ─────────────────────────────────────────────────────────── */
+
+.mo-library {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 28px 16px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.mo-lib-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.mo-lib-head h1 {
+  margin: 0 0 4px;
+  font-size: 1.6rem;
+}
+
+.mo-lib-head p {
+  margin: 0;
+}
+
+.mo-new {
+  padding: 10px 18px;
+}
+
+.mo-h2 {
+  font-size: 1.05rem;
+  margin: 0 0 10px;
+}
+
+.mo-starters {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 10px;
+}
+
+.mo-starter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  cursor: pointer;
+}
+
+.mo-starter:hover {
+  border-color: var(--primary);
+}
+
+.mo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
+}
+
+.mo-card {
+  position: relative;
+  min-width: 0;
+}
+
+.mo-card-open {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  cursor: pointer;
+}
+
+.mo-card-open:hover {
+  border-color: var(--primary);
+}
+
+.mo-poster {
+  display: block;
+  width: 100%;
+  aspect-ratio: 9 / 16;
+  max-height: 260px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: repeating-linear-gradient(135deg, var(--bg), var(--bg) 10px, var(--primary-soft) 10px, var(--primary-soft) 20px);
+}
+
+.mo-poster.ar-16x9 {
+  aspect-ratio: 16 / 9;
+}
+
+.mo-poster.ar-1x1 {
+  aspect-ratio: 1;
+}
+
+.mo-poster.ar-4x5 {
+  aspect-ratio: 4 / 5;
+}
+
+.mo-poster img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* a long title takes two lines before it ends in an ellipsis */
+.mo-card-title {
+  font-weight: 600;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  margin-top: 2px;
+}
+
+.mo-card-delete {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 0;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.mo-card:hover .mo-card-delete,
+.mo-card-delete:focus-visible {
+  opacity: 1;
+}
+
+.mo-kits-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mo-kits-head .mo-h2 {
+  margin: 0;
+}
+
+.mo-kits {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.mo-kit {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.mo-kit-swatches {
+  position: relative;
+  height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 1.2rem;
+}
+
+.mo-kit-swatches img {
+  max-width: 70%;
+  max-height: 44px;
+  object-fit: contain;
+}
+
+.mo-kit-dots {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 4px;
+}
+
+.mo-kit-dots i,
+.mo-swatches i {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px rgba(127, 127, 127, 0.35);
+}
+
+.mo-kit-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px 0;
+  min-width: 0;
+}
+
+.mo-kit-actions {
+  display: flex;
+  gap: 6px;
+  padding: 10px 12px 12px;
+}
+
+/* ── top navigation ──────────────────────────────────────────────────── */
+
+.topnav {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── editor layout ───────────────────────────────────────────────────── */
+
+.mo-editor {
+  height: calc(100dvh - 48px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.mo-loading {
+  display: flex;
+  justify-content: center;
+  padding: 60px 16px;
+}
+
+.mo-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.mo-title {
+  flex: 0 1 300px;
+  min-width: 120px;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.mo-title:hover,
+.mo-title:focus {
+  border-color: var(--border);
+  background: var(--bg);
+}
+
+.mo-top select.mo-select {
+  width: auto;
+  padding: 6px 10px;
+  font-size: 0.88rem;
+}
+
+.mo-spacer {
+  flex: 1;
+}
+
+.mo-top-bar {
+  margin: 0;
+  height: 3px;
+  border-radius: 0;
+}
+
+.mo-banner {
+  margin: 8px 12px 0;
+  font-size: 0.9rem;
+}
+
+.mo-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(330px, 430px) minmax(0, 1fr);
+}
+
+.mo-left {
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+.mo-right {
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 12px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.btn-on {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.linkish {
+  font: inherit;
+  color: var(--primary);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* ── menus in the top bar ── */
+
+.mo-menu-wrap {
+  position: relative;
+}
+
+.mo-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+  width: 320px;
+  max-width: calc(100vw - 24px);
+  /* a tall menu (export with every option) scrolls inside the window instead of running off it */
+  max-height: calc(100dvh - 120px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+
+/* a menu opened from the left half of the top bar opens towards the right */
+.mo-menu.mo-menu-left {
+  right: auto;
+  left: 0;
+}
+
+.mo-menu p {
+  margin: 0;
+}
+
+.mo-export {
+  width: 360px;
+}
+
+.mo-video-menu {
+  width: 380px;
+}
+
+/* the top bar's buttons sit on one line (.btn-small elsewhere aligns to the top of its column) */
+.mo-top > .btn,
+.mo-top > .mo-menu-wrap {
+  align-self: center;
+}
+
+.mo-video-btn {
+  gap: 8px;
+}
+
+/* a small mark for where the film goes: red for YouTube, purple for Udemy */
+.mo-dest {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.mo-dest-youtube {
+  background: #e5322d;
+}
+
+.mo-dest-udemy {
+  background: #8f4fe0;
+}
+
+/* a checkbox with a title and a line under it (export sound, the video's closing) */
+.mo-check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 6px 0;
+  cursor: pointer;
+}
+
+.mo-check-row input {
+  margin: 3px 0 0;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.mo-check-row > span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.mo-check-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.mo-check-row.off {
+  cursor: not-allowed;
+}
+
+.mo-check-row.off .mo-check-title {
+  color: var(--muted);
+}
+
+.mo-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.mo-settings .mo-field {
+  gap: 2px;
+}
+
+.mo-settings .label {
+  margin-bottom: 4px;
+}
+
+.mo-settings-note {
+  margin: 6px 0 0 !important;
+  font-size: 0.82rem;
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.mo-seg.mo-seg-wide {
+  align-self: stretch;
+  display: flex;
+}
+
+.mo-seg.mo-seg-wide button {
+  flex: 1;
+  padding: 8px 14px;
+  font-weight: 600;
+}
+
+.mo-seg button:disabled {
+  cursor: not-allowed;
+}
+
+.mo-music-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.mo-music-row select {
+  flex: 1;
+}
+
+.mo-music-row .btn {
+  align-self: stretch;
+  flex: none;
+}
+
+.mo-closing-line {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.mo-warn-text {
+  color: var(--warn);
+}
+
+.mo-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  align-self: flex-start;
+}
+
+.mo-seg button {
+  font: inherit;
+  font-size: 0.88rem;
+  color: inherit;
+  background: var(--surface);
+  border: 0;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+.mo-seg button.on {
+  background: var(--primary);
+  color: var(--primary-text);
+}
+
+.mo-export-run,
+.mo-export-done {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mo-export-run .bar {
+  margin: 0;
+}
+
+.mo-renders {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.mo-renders a {
+  overflow-wrap: anywhere;
+}
+
+/* ── chat ────────────────────────────────────────────────────────────── */
+
+.mo-chat {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.mo-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mo-welcome h3 {
+  margin: 0 0 6px;
+}
+
+.mo-welcome p {
+  margin: 0 0 12px;
+  font-size: 0.92rem;
+}
+
+.mo-examples {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mo-example {
+  text-align: left;
+  font: inherit;
+  font-size: 0.86rem;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.mo-example:hover {
+  border-color: var(--primary);
+}
+
+.mo-msg {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mo-user {
+  align-self: flex-end;
+  max-width: 90%;
+  background: var(--primary-soft);
+  border-radius: 12px 12px 2px 12px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mo-user-text {
+  white-space: pre-wrap;
+}
+
+.mo-comment-tag {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.mo-assistant p,
+.mo-assistant ul,
+.mo-assistant ol {
+  margin: 0 0 8px;
+}
+
+.mo-assistant ul,
+.mo-assistant ol {
+  padding-left: 20px;
+}
+
+.mo-assistant > :last-child {
+  margin-bottom: 0;
+}
+
+/* links, headings, tables and code in Claude's messages (and documents) */
+.mo-assistant a,
+.mo-md a {
+  color: var(--primary);
+  overflow-wrap: anywhere;
+}
+
+.mo-assistant h2,
+.mo-assistant h3,
+.mo-assistant h4 {
+  margin: 10px 0 6px;
+  font-size: 0.98rem;
+  line-height: 1.3;
+}
+
+.mo-assistant > h2:first-child,
+.mo-assistant > h3:first-child,
+.mo-assistant > h4:first-child {
+  margin-top: 0;
+}
+
+.mo-assistant li + li,
+.mo-md li + li {
+  margin-top: 2px;
+}
+
+.mo-assistant li.sub,
+.mo-md li.sub {
+  margin-left: 18px;
+  list-style-type: circle;
+}
+
+.mo-md-table {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0 0 8px;
+}
+
+.mo-md-table table {
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.mo-md-table th,
+.mo-md-table td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.mo-md-table th {
+  background: var(--bg);
+}
+
+.mo-md-pre {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+  font: 0.8rem/1.45 ui-monospace, Consolas, monospace;
+}
+
+.mo-md-pre code {
+  background: none;
+  padding: 0;
+}
+
+.mo-assistant code,
+.mo-user code,
+.mo-comment-tag code {
+  font-size: 0.85em;
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.mo-progress {
+  font-size: 0.85rem;
+  color: var(--muted);
+  border-left: 2px solid var(--border);
+  padding-left: 10px;
+  white-space: pre-wrap;
+}
+
+.mo-tool {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
+.mo-tool-icon {
+  width: 16px;
+  display: inline-flex;
+  justify-content: center;
+  font-weight: 700;
+}
+
+.mo-tool.ok .mo-tool-icon {
+  color: var(--ok);
+}
+
+.mo-tool.error {
+  color: var(--error);
+}
+
+.mo-tool-detail {
+  flex-basis: 100%;
+  padding-left: 24px;
+  font-size: 0.8rem;
+}
+
+.mo-tool .spinner,
+.mo-working .spinner,
+.mo-attach .spinner {
+  width: 12px;
+  height: 12px;
+}
+
+.mo-frame-check {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  padding-left: 24px;
+}
+
+.mo-frame-check button {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: none;
+  cursor: zoom-in;
+}
+
+.mo-frame-check img {
+  display: block;
+  max-width: 120px;
+  max-height: 150px;
+}
+
+.mo-style {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mo-style-q {
+  font-weight: 600;
+}
+
+.mo-style-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.mo-style-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.mo-style-card:hover:not(:disabled) {
+  border-color: var(--primary);
+}
+
+.mo-style-card:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.mo-style-card.chosen {
+  opacity: 1;
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.mo-style-card.other {
+  border-style: dashed;
+}
+
+.mo-swatches {
+  display: flex;
+  gap: 4px;
+}
+
+.mo-style-name {
+  font-weight: 600;
+}
+
+.mo-style-desc {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.mo-verb {
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 0.72rem;
+}
+
+.mo-usage {
+  font-size: 0.74rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.mo-error {
+  background: var(--error-soft);
+  color: var(--error);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 0.9rem;
+}
+
+.mo-note {
+  align-self: center;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.mo-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.mo-divider::before,
+.mo-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--border);
+}
+
+.mo-working {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+/* a build that stopped part-way: how many scenes are left, and the button that sends Claude back to them */
+.mo-continue {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.mo-continue > span {
+  min-width: 0;
+}
+
+.mo-continue .btn {
+  flex: none;
+}
+
+.mo-composer {
+  position: relative;
+  border-top: 1px solid var(--border);
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface);
+}
+
+.mo-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.mo-input-row textarea {
+  flex: 1;
+  resize: none;
+  min-height: 40px;
+  max-height: 220px;
+  line-height: 1.4;
+}
+
+.mo-attach {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+}
+
+.mo-attach svg {
+  width: 18px;
+  height: 18px;
+}
+
+.mo-stop {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.mo-attached {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mo-attached .chip {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-weight: 500;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mo-attach-chip button {
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  margin-left: 4px;
+}
+
+.mo-commands {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(100% + 4px);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+  z-index: 5;
+}
+
+.mo-commands button {
+  text-align: left;
+  font: inherit;
+  font-size: 0.88rem;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.mo-commands button:hover {
+  background: var(--primary-soft);
+}
+
+.mo-other-hint {
+  font-size: 0.85rem;
+  color: var(--primary);
+}
+
+.mo-drop {
+  position: absolute;
+  inset: 8px;
+  border: 2px dashed var(--primary);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface) 85%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.mo-zoom {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  cursor: zoom-out;
+}
+
+.mo-zoom img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
+}
+
+/* ── preview ─────────────────────────────────────────────────────────── */
+
+.mo-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mo-frame-wrap {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.mo-frame {
+  position: relative;
+  background: #0b0d12;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 0 var(--border), 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+
+.mo-frame iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.mo-frame-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 0.9rem;
+  pointer-events: none;
+}
+
+.mo-frame-empty span {
+  opacity: 0.7;
+  max-width: 260px;
+}
+
+.mo-frame-errors {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: #b42318;
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+.mo-pin-pop {
+  position: absolute;
+  z-index: 5;
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+}
+
+.mo-pin-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.mo-pin-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.mo-transport {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mo-play {
+  width: 42px;
+  height: 36px;
+  padding: 0;
+}
+
+.mo-play svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+.mo-time {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.mo-scene-now {
+  font-size: 0.85rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mo-scrub {
+  position: relative;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--primary-soft);
+  cursor: pointer;
+  touch-action: none;
+}
+
+.mo-scrub-fill {
+  height: 100%;
+  border-radius: 5px;
+  background: var(--primary);
+}
+
+/* a part starts here */
+.mo-scrub-tick {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--text) 35%, transparent);
+  pointer-events: none;
+}
+
+.mo-scrub-knob {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 3px solid var(--primary);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* the scene strip: scrolls sideways, every chip stays readable, grouped under its part */
+.mo-chips {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 2px 2px 8px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+
+.mo-group {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mo-group + .mo-group {
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+/* the part name never widens its group: it takes the chips' width and ends in an ellipsis */
+.mo-group-title {
+  width: 0;
+  min-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+
+.mo-group-chips {
+  display: flex;
+  gap: 4px;
+}
+
+.mo-chip {
+  position: relative;
+  overflow: hidden;
+  flex: none;
+  width: 140px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  font: inherit;
+  font-size: 0.78rem;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px 7px;
+  cursor: pointer;
+}
+
+.mo-chip:hover {
+  border-color: var(--primary);
+}
+
+.mo-chip.selected {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.mo-chip.current {
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.mo-chip.planned {
+  border-style: dashed;
+  color: var(--muted);
+}
+
+/* the app's own scenes: the AlgoInsight promo (marker yellow) and the end screen */
+.mo-chip.kind-promo:not(.selected) {
+  background: color-mix(in srgb, var(--mark) 30%, var(--surface));
+}
+
+.mo-chip.kind-endscreen:not(.selected) {
+  background: color-mix(in srgb, var(--text) 6%, var(--surface));
+}
+
+.mo-chip-top {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mo-chip-num {
+  flex: none;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.mo-chip-name {
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mo-chip-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* how far the playhead is through the playing scene */
+.mo-chip-progress {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--primary);
+}
+
+/* the voice state of a scene: voiced, words changed since, no voice yet, silent */
+.mo-vdot {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+
+.mo-vdot.voiced {
+  background: var(--ok);
+}
+
+.mo-vdot.changed {
+  background: var(--warn);
+}
+
+.mo-vdot.none {
+  box-shadow: inset 0 0 0 1.5px var(--muted);
+}
+
+.mo-vdot.silent {
+  box-shadow: inset 0 0 0 1.5px var(--border);
+}
+
+.mo-timeline-foot {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: 0.72rem;
+}
+
+.mo-timeline-foot .mo-vdot {
+  margin: 0 3px 0 8px;
+}
+
+.mo-timeline-foot .mo-vdot:first-child {
+  margin-left: 0;
+}
+
+/* ── properties ──────────────────────────────────────────────────────── */
+
+.mo-props {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mo-props p {
+  margin: 0;
+}
+
+.mo-props-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mo-props-head h3 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mo-props-head h3 .muted {
+  font-weight: 500;
+}
+
+/* the previous / next scene buttons */
+.mo-step {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.mo-step .btn {
+  align-self: center;
+  width: 32px;
+  padding: 4px 0;
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.mo-props-note {
+  background: var(--primary-soft);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.mo-tabs {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mo-tabs button {
+  font: inherit;
+  font-size: 0.82rem;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+
+.mo-tabs button.on {
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.mo-save-state {
+  min-width: 52px;
+  text-align: right;
+}
+
+.mo-props-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.mo-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mo-field .label {
+  margin: 0;
+}
+
+.mo-field.check {
+  flex-direction: row-reverse;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.mo-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.mo-color {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.mo-color input[type="color"] {
+  width: 42px;
+  height: 38px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  flex: none;
+  cursor: pointer;
+}
+
+input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 12px;
+}
+
+input.bad {
+  border-color: var(--error);
+}
+
+.mo-more summary {
+  cursor: pointer;
+  font-size: 0.88rem;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.mo-more {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mo-more > .mo-field + .mo-field {
+  margin-top: 10px;
+}
+
+.mo-idea {
+  font-style: italic;
+}
+
+.mo-code textarea {
+  min-height: 340px;
+  font: 0.8rem/1.5 ui-monospace, Consolas, monospace;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+}
+
+.mo-code-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.mo-code-actions .muted {
+  flex: 1;
+}
+
+/* ── brand kit dialog ────────────────────────────────────────────────── */
+
+.mo-modal-back {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.mo-modal {
+  width: min(780px, 100%);
+  max-height: min(92dvh, 940px);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.mo-modal-head,
+.mo-modal-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+}
+
+.mo-modal-head {
+  border-bottom: 1px solid var(--border);
+  justify-content: space-between;
+}
+
+.mo-modal-head h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.mo-modal-foot {
+  border-top: 1px solid var(--border);
+  justify-content: flex-end;
+}
+
+.mo-modal-foot > :first-child {
+  flex: 1;
+}
+
+.mo-modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.mo-kit-section p {
+  margin: 6px 0 0;
+}
+
+.mo-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.mo-swatch-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.mo-kit-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.mo-kit-grid .wide {
+  grid-column: 1 / -1;
+}
+
+.mo-extras {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.mo-extra {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px 2px 3px;
+  font-size: 0.85rem;
+}
+
+.mo-extra input[type="color"] {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+}
+
+.mo-extra button {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.mo-extra-add {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.mo-extra-add input {
+  width: 170px;
+  padding: 5px 10px;
+}
+
+.mo-logo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mo-logo-box {
+  width: 180px;
+  height: 64px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mo-logo-box img {
+  max-width: 160px;
+  max-height: 46px;
+  object-fit: contain;
+}
+
+.mo-endcard {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px 12px;
+  gap: 8px;
+}
+
+.mo-endcard legend {
+  padding: 0 4px;
+}
+
+.mo-kit-preview {
+  padding: 24px;
+  border: 1px solid var(--border);
+}
+
+.mo-kit-card {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mo-kit-tag {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mo-kit-h {
+  font-size: 1.7rem;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+/* ── narrow screens: the preview first, then the chat ── */
+
+@media (max-width: 980px) {
+  .mo-editor {
+    height: auto;
+  }
+  .mo-body {
+    grid-template-columns: 1fr;
+  }
+  .mo-left {
+    order: 2;
+    height: 75dvh;
+    border-right: 0;
+    border-top: 1px solid var(--border);
+  }
+  .mo-right {
+    order: 1;
+    overflow: visible;
+  }
+}
+
+@media (max-width: 640px) {
+  .mo-lib-head {
+    flex-direction: column;
+  }
+  .mo-style-grid,
+  .mo-kit-grid,
+  .mo-field-row {
+    grid-template-columns: 1fr;
+  }
+  .mo-title {
+    flex-basis: 100%;
+  }
+}
+
+/* ── voice menu ──────────────────────────────────────────────────────── */
+
+.mo-voice-menu {
+  width: 380px;
+  max-height: min(78dvh, 720px);
+  overflow-y: auto;
+}
+
+.mo-voice {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mo-voice p {
+  margin: 0;
+}
+
+.mo-voice-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mo-voice-list ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.mo-pron {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mo-pron-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.mo-pron-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) 24px;
+  gap: 6px;
+  align-items: center;
+}
+
+.mo-pron-row input {
+  padding: 5px 8px;
+  font-size: 0.85rem;
+}
+
+.mo-pron-row button {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.mo-pron-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+/* ── script dialog ───────────────────────────────────────────────────── */
+
+.mo-script {
+  width: min(900px, 100%);
+}
+
+.mo-script-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 16px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.mo-script-tabs button {
+  font: inherit;
+  font-size: 0.86rem;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.mo-script-tabs button.on {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+  font-weight: 600;
+}
+
+.mo-md h2 {
+  font-size: 1.2rem;
+  margin: 0 0 8px;
+}
+
+.mo-md h3 {
+  font-size: 1rem;
+  margin: 18px 0 6px;
+  color: var(--primary);
+}
+
+.mo-md h4 {
+  font-size: 0.92rem;
+  margin: 14px 0 4px;
+}
+
+.mo-md p {
+  margin: 0 0 8px;
+  line-height: 1.55;
+}
+
+.mo-md ul {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.mo-cue {
+  display: inline-block;
+  margin: 0 3px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 0.75em;
+  font-weight: 700;
+  vertical-align: 1px;
+}
+
+.mo-chapters {
+  margin: 0 0 10px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font: 0.9rem/1.6 ui-monospace, Consolas, monospace;
+  white-space: pre-wrap;
+}

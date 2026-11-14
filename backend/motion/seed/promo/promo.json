@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "about": "The AlgoInsight promo: about a minute, four narrated paper scenes the video's settings add before the end screen (YouTube only). Every claim follows the live marketing copy in AlgoInsight's client/src/pages/Home.tsx (Nov 2026): nearly 700 narrated lessons, 640+ problems in 30+ patterns, the algorithm visualizer, four AI mock interview rounds, the AI mentor and the prep planner.",
+  "part": "AlgoInsight",
+  "pronunciations": [
+    { "written": "algoinsight.io", "spoken": "AlgoInsight dot I-O" },
+    { "written": "DSA", "spoken": "D-S-A" }
+  ],
+  "scenes": [
+    {
+      "id": "algoinsight-1",
+      "name": "More on AlgoInsight",
+      "idea": "This video is one piece of AlgoInsight: from the first lesson to the first offer.",
+      "label": "THERE'S MORE ON ALGOINSIGHT",
+      "transition": "tear",
+      "file": "algoinsight-1.html",
+      "narration": "Before you go, one more thing. <cue/> This video is one small piece of AlgoInsight, <cue/> a place we built to take you from your first lesson <cue/> all the way to your first offer. <cue/> Here's what's waiting for you there."
+    },
+    {
+      "id": "algoinsight-2",
+      "name": "Learn by watching",
+      "idea": "Nearly 700 narrated lessons on full articles, and step-by-step animations.",
+      "label": "LEARN BY WATCHING",
+      "transition": "turn",
+      "file": "algoinsight-2.html",
+      "narration": "First, you learn by watching. <cue/> Nearly seven hundred narrated video lessons like this one, <cue/> each one sitting on top of a full written article. <cue/> And animations that let you step through sorting, trees, graphs and dynamic programming, <cue/> one move at a time."
+    },
+    {
+      "id": "algoinsight-3",
+      "name": "Practise, then interview",
+      "idea": "640+ problems in 30+ patterns in an AI powered editor, then four AI mock interview rounds.",
+      "label": "PRACTISE, THEN INTERVIEW",
+      "transition": "turn",
+      "file": "algoinsight-3.html",
+      "narration": "Then you practise. <cue/> More than six hundred coding problems, grouped into over thirty patterns, <cue/> in an AI powered editor. <cue/> And when you feel ready, <cue/> there are four AI mock interviews, for DSA, technical, behavioral and system design rounds, <cue/> with an interviewer that listens, asks follow up questions and scores your answers."
+    },
+    {
+      "id": "algoinsight-4",
+      "name": "A mentor and a plan",
+      "idea": "The AI mentor and the prep planner, then where to start.",
+      "label": "A MENTOR AND A PLAN",
+      "transition": "turn",
+      "file": "algoinsight-4.html",
+      "narration": "And you're never on your own. <cue/> An AI mentor that knows your courses and your scores answers your questions, any hour of the day. <cue/> The prep planner turns the time you really have into a plan for every single day. <cue/> Start free at algoinsight.io."
+    }
+  ]
+}

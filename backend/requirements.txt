@@ -2,3 +2,8 @@ yt-dlp>=2026.10.26
 faster-whisper>=1.2
 fastapi>=0.115
 uvicorn[standard]>=0.32
+# Motion: Claude, the headless browser for frames and exports, file uploads
+anthropic>=2.8
+playwright>=1.65
+python-multipart>=0.0.20
+claude-agent-sdk>=0.2.180

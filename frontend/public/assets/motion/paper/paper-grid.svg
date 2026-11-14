@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <!-- The daily series' paper: pale blue graph paper - a fine square grid, a stronger line every fifth square,
+       a soft darkening at the edges. (It began as cream with dots, which read as another company's brand.)
+       The grid is centred on the frame, so the middle of the screen sits on a strong line. -->
+  <defs>
+    <pattern id="fine" width="28" height="28" patternUnits="userSpaceOnUse" patternTransform="translate(16 2)">
+      <path d="M28 0H0V28" fill="none" stroke="#CDDEF4" stroke-width="1" />
+    </pattern>
+    <pattern id="bold" width="140" height="140" patternUnits="userSpaceOnUse" patternTransform="translate(100 30)">
+      <path d="M140 0H0V140" fill="none" stroke="#AECAEC" stroke-width="1.4" />
+    </pattern>
+    <radialGradient id="edge" cx="50%" cy="50%" r="75%">
+      <stop offset="60%" stop-color="#000" stop-opacity="0" />
+      <stop offset="100%" stop-color="#1E3A5F" stop-opacity="0.12" />
+    </radialGradient>
+  </defs>
+  <rect width="1600" height="900" fill="#F1F6FD" />
+  <rect width="1600" height="900" fill="url(#fine)" />
+  <rect width="1600" height="900" fill="url(#bold)" />
+  <rect width="1600" height="900" fill="url(#edge)" />
+</svg>

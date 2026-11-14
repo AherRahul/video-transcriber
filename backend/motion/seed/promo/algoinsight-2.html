@@ -1,0 +1,71 @@
+<style>
+/* first the lessons and their articles, then the animations with a sort playing one move at a time */
+.abs { position: absolute; }
+.lessons { left: 140px; top: 290px; width: 640px; min-height: 300px; display: flex; align-items: center; gap: 30px; padding: 28px 34px; }
+.play { flex: none; width: 120px; height: 120px; background: var(--c-lemon); }
+.play svg { width: 54px; height: 54px; margin-left: 8px; }
+.play svg path { fill: var(--ink); stroke: none; }
+.count { display: flex; align-items: baseline; }
+.plus { font: 800 90px/1 var(--font-display); color: var(--ink); }
+.what { margin-top: 4px; }
+.article { left: 820px; top: 290px; width: 640px; min-height: 300px; padding: 32px 34px; }
+.article .p-card-title { font-size: 34px; }
+.line { height: 16px; border-radius: 8px; background: #cbd5e1; margin-top: 20px; }
+.l2 { width: 90%; }
+.l3 { width: 72%; }
+.l4 { width: 84%; }
+.anim { left: 240px; top: 200px; width: 1120px; height: 560px; padding: 28px 40px; }
+.anim .p-card-title { font-size: 40px; }
+.topics { position: absolute; left: 40px; top: 100px; display: flex; gap: 24px; }
+.topics .p-tag { height: 52px; font-size: 22px; padding: 0 16px; }
+.bars { position: absolute; left: 60px; right: 60px; bottom: 44px; height: 250px; }
+.bar { position: absolute; bottom: 0; width: 80px; border: 4px solid var(--ink); border-radius: 12px 12px 4px 4px; background: var(--c-peach); }
+</style>
+<div class="abs p-card lessons" data-id="card-lessons">
+  <div class="p-badge play" data-id="play"><svg viewBox="0 0 24 24"><path d="M6 4 L20 12 L6 20 Z"/></svg></div>
+  <div><div class="count"><span class="p-num" data-id="num-lessons">690</span><span class="plus">+</span></div><div class="p-card-text what">narrated video lessons</div></div>
+</div>
+<div class="abs p-card sky article" data-id="card-article">
+  <div class="p-card-title">On a full written article</div>
+  <div class="line"></div><div class="line l2"></div><div class="line l3"></div><div class="line l4"></div>
+</div>
+<div class="abs p-card anim" data-id="card-anim">
+  <div class="p-card-title">Animations</div>
+  <div class="topics"><span class="p-tag" data-id="t-sort">Sorting</span><span class="p-tag blue" data-id="t-trees">Trees</span><span class="p-tag green" data-id="t-graphs">Graphs</span><span class="p-tag pen" data-id="t-dp">DP</span></div>
+  <div class="bars" data-id="bars">
+    <div class="bar" style="left:0px;height:150px"></div>
+    <div class="bar" style="left:152px;height:90px"></div>
+    <div class="bar" style="left:304px;height:230px"></div>
+    <div class="bar" style="left:456px;height:60px"></div>
+    <div class="bar" style="left:608px;height:190px"></div>
+    <div class="bar" style="left:760px;height:120px"></div>
+    <div class="bar" style="left:912px;height:40px"></div>
+  </div>
+</div>
+<script>
+const bars = $$('.bar');
+// GSAP tweens real colours, not CSS variables: read the kit's tints once
+const tint = (name, fallback) => getComputedStyle(root).getPropertyValue(name).trim() || fallback;
+const mint = tint('--c-mint', '#bbf7d0');
+const peach = tint('--c-peach', '#fed7aa');
+fx.pop($('card-lessons'), cue(0, 0.2));
+fx.count($('num-lessons'), 0, 690, cue(1), 1.1);
+fx.pop($('play'), cue(1, 0.2));
+fx.slide($('card-article'), cue(2));
+fx.exit([$('card-lessons'), $('card-article')], cue(3, -0.35));
+fx.pop($('card-anim'), cue(3));
+fx.tearOn([$('t-sort'), $('t-trees'), $('t-graphs'), $('t-dp')], cue(3, 0.5));
+tl.fromTo(bars, { scaleY: 0, transformOrigin: '50% 100%' }, { scaleY: 1, duration: 0.4, ease: 'power2.out', stagger: 0.06 }, cue(3, 0.3));
+// one move at a time: compare a pair (mint), swap them, then the next pair
+// (both swaps are done about 1.3 s after "one move at a time", before the page turns)
+const swap = (a, b, at) => {
+  const dx = 152;
+  tl.to([bars[a], bars[b]], { backgroundColor: mint, duration: 0.1 }, at);
+  tl.to(bars[a], { x: dx, duration: 0.36, ease: 'power2.inOut' }, at + 0.12);
+  tl.to(bars[b], { x: -dx, duration: 0.36, ease: 'power2.inOut' }, at + 0.12);
+  tl.to([bars[a], bars[b]], { backgroundColor: peach, duration: 0.12 }, at + 0.52);
+  fx.sound('pop', at + 0.12, 0.5);
+};
+swap(0, 1, cue(4));
+swap(2, 3, cue(4, 0.66));
+</script>

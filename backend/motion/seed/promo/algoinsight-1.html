@@ -1,0 +1,32 @@
+<style>
+/* the road: first lesson, three stops, first offer */
+.abs { position: absolute; }
+.head { left: 140px; top: 226px; font-size: 76px; white-space: nowrap; }
+.end { top: 420px; width: 330px; padding: 26px 30px; text-align: center; }
+.end .p-card-title { font-size: 40px; }
+.start { left: 140px; }
+.goal { left: 1130px; }
+.road { left: 492px; top: 436px; width: 616px; height: 96px; overflow: visible; }
+.stop { top: 600px; width: 190px; padding: 20px 10px; text-align: center; }
+.stop .p-sticky-title { font-size: 32px; }
+.s1 { left: 505px; }
+.s2 { left: 720px; }
+.s3 { left: 935px; }
+</style>
+<h1 class="abs p-head head" data-id="head">There's more on <span class="p-marked">AlgoInsight</span></h1>
+<div class="abs p-card lemon end start" data-id="card-start"><div class="p-card-title">First lesson</div></div>
+<svg class="abs road" data-id="road" viewBox="0 0 616 96"><path class="p-arrow head" d="M 10 48 C 200 8, 420 88, 596 48"/></svg>
+<div class="abs p-card mint end goal" data-id="card-goal"><div class="p-card-title">First offer</div></div>
+<div class="abs p-sticky sky stop s1" data-id="stop-watch"><div class="p-sticky-title">Watch</div></div>
+<div class="abs p-sticky pink tilt-r stop s2" data-id="stop-practise"><div class="p-sticky-title">Practise</div></div>
+<div class="abs p-sticky peach stop s3" data-id="stop-interview"><div class="p-sticky-title">Interview</div></div>
+<script>
+fx.rise($('head'), cue(0, 0.1));
+fx.marker($('head').querySelector('.p-marked'), cue(1, 0.5));
+fx.pop($('card-start'), cue(2));
+fx.draw($('road').querySelector('path'), cue(3), 0.8);
+fx.pop($('card-goal'), cue(3, 0.75));
+fx.unfold($('stop-watch'), cue(4));
+fx.unfold($('stop-practise'), cue(4, 0.25));
+fx.unfold($('stop-interview'), cue(4, 0.5));
+</script>
