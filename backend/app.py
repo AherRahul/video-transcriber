@@ -5,6 +5,7 @@ POST /api/jobs                {url, language?, model?, forceWhisper?}  -> {id}
 GET  /api/jobs/{id}           -> status, progress and, when done, the transcript
 GET  /api/jobs/{id}/download  ?format=txt|srt|vtt&timestamps=true|false
 GET  /api/health              -> tools found
+     /api/motion/...           -> Motion: short animated videos made by Claude (see motion/api.py)
 
 Jobs run one at a time in a background thread (Whisper uses every CPU core) and live in memory
 until the server stops.
@@ -27,8 +28,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import transcriber as tr
+from motion import api as motion_api
 
 app = FastAPI(title="Video Transcriber")
+
+# The built page (frontend/dist). Motion's player page is served from it too.
+_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+motion_api.install(app, _dist, tr.find_ffmpeg)
 
 _executor = ThreadPoolExecutor(max_workers=1)
 _jobs: dict[str, dict] = {}
@@ -146,7 +152,6 @@ def download(job_id: str, format: str = "txt", timestamps: bool = True) -> Plain
 
 
 # The built page (frontend/dist), when present, is served from the same address.
-_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if _dist.exists():
     app.mount("/assets", StaticFiles(directory=_dist / "assets"), name="assets")
 

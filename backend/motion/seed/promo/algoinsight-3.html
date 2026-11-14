@@ -1,0 +1,41 @@
+<style>
+/* practise (problems, patterns, the editor), then the four interview rooms */
+.abs { position: absolute; }
+.stat { top: 236px; width: 520px; padding: 28px 34px; }
+.stat .row { display: flex; align-items: baseline; }
+.plus { font: 800 90px/1 var(--font-display); color: var(--ink); }
+.st1 { left: 220px; }
+.st2 { left: 860px; }
+.editor { left: 420px; top: 552px; width: 760px; display: flex; align-items: center; gap: 26px; padding: 24px 32px; }
+.editor .p-badge { flex: none; }
+.editor .p-card-title { font-size: 40px; }
+.code { font: 800 34px/1 var(--font-mono); }
+.room { width: 330px; padding: 22px 24px; text-align: center; }
+.room .p-sticky-title { font-size: 34px; }
+.r1 { left: 420px; top: 236px; }
+.r2 { left: 830px; top: 236px; }
+.r3 { left: 420px; top: 400px; }
+.r4 { left: 830px; top: 400px; }
+.how { left: 470px; top: 610px; font-size: 46px; }
+</style>
+<div class="abs p-card lemon stat st1" data-id="card-problems"><div class="row"><span class="p-num" data-id="num-problems">640</span><span class="plus">+</span></div><div class="p-card-text">coding problems</div></div>
+<div class="abs p-card sky stat st2" data-id="card-patterns"><div class="row"><span class="p-num" data-id="num-patterns">30</span><span class="plus">+</span></div><div class="p-card-text">patterns</div></div>
+<div class="abs p-card editor" data-id="card-editor"><div class="p-badge"><span class="code">&lt;/&gt;</span></div><div class="p-card-title">AI powered editor</div></div>
+<div class="abs p-sticky lemon room r1" data-id="room-dsa"><div class="p-sticky-title">DSA</div></div>
+<div class="abs p-sticky sky tilt-r room r2" data-id="room-technical"><div class="p-sticky-title">Technical</div></div>
+<div class="abs p-sticky mint tilt-r room r3" data-id="room-behavioral"><div class="p-sticky-title">Behavioral</div></div>
+<div class="abs p-sticky peach room r4" data-id="room-design"><div class="p-sticky-title">System design</div></div>
+<div class="abs p-note how" data-id="note-how">it listens, follows up and scores you</div>
+<script>
+fx.pop($('card-problems'), cue(1));
+fx.count($('num-problems'), 0, 640, cue(1, 0.1), 1.0);
+fx.pop($('card-patterns'), cue(1, 1.6));
+fx.count($('num-patterns'), 0, 30, cue(1, 1.7), 0.6);
+fx.pop($('card-editor'), cue(2));
+fx.exit([$('card-problems'), $('card-patterns'), $('card-editor')], cue(3, -0.3));
+fx.unfold($('room-dsa'), cue(4));
+fx.unfold($('room-technical'), cue(4, 0.6));
+fx.unfold($('room-behavioral'), cue(4, 1.2));
+fx.unfold($('room-design'), cue(4, 1.8));
+fx.write($('note-how'), cue(5));
+</script>

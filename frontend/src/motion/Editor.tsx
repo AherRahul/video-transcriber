@@ -1,0 +1,648 @@
+// One video: chat on the left, the live preview, scene strip and properties on the right, and a top
+// bar with the title, aspect, brand kit, the video's settings (YouTube or Udemy, logo, web address,
+// promo, end screen, target length), Claude settings, Script, Voice, Undo and Export.
+//
+// The page keeps a copy of the chat log and the project, and long-polls /events for every change
+// (streamed text, tool steps, a new project version, export progress), so the preview updates as
+// Claude writes each scene.
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import { ago, articleFor, bytesLabel, clock, motionApi, takeDraft } from "./api";
+import BrandKitEditor from "./BrandKitEditor";
+import Chat, { type Command, type SendInput } from "./Chat";
+import Preview from "./Preview";
+import PropsPanel from "./PropsPanel";
+import ScriptModal from "./ScriptModal";
+import { isBuildable, type Aspect, type Asset, type BrandKit, type CommentTarget, type ExportJob, type HubOp, type LogEntry, type MotionHealth, type ProjectView, type VoiceJob } from "./types";
+import VideoSettings, { closingSummary, destinationOf } from "./VideoSettings";
+import VoicePanel from "./VoicePanel";
+
+type Props = { projectId: string; health: MotionHealth | null; onBack: () => void; onOpen: (id: string) => void };
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+export default function Editor({ projectId, health, onBack, onOpen }: Props) {
+  const [view, setView] = useState<ProjectView | null>(null);
+  const [log, setLog] = useState<LogEntry[]>([]);
+  const [running, setRunning] = useState(false);
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [kits, setKits] = useState<BrandKit[]>([]);
+  const [job, setJob] = useState<ExportJob | null>(null);
+  const [voiceJob, setVoiceJob] = useState<VoiceJob | null>(null);
+  const [scriptOpen, setScriptOpen] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [kitEditor, setKitEditor] = useState<{ kit: BrandKit | null; copyFrom?: BrandKit | null } | null>(null);
+  const [menu, setMenu] = useState<"export" | "settings" | "voice" | "video" | null>(null);
+  const [title, setTitle] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const draft = useMemo(() => takeDraft(projectId), [projectId]);
+  const seqRef = useRef(0);
+  const bootRef = useRef("");
+  const refreshTimer = useRef<number | undefined>(undefined);
+
+  const applyView = useCallback((v: ProjectView) => {
+    setView(v);
+    setRunning(v.running);
+    setJob(v.exportJob);
+    setVoiceJob(v.voiceJob);
+    setTitle((t) => (document.activeElement?.id === "mo-title" ? t : v.project.title));
+  }, []);
+
+  const refreshView = useCallback(() => {
+    window.clearTimeout(refreshTimer.current);
+    refreshTimer.current = window.setTimeout(() => {
+      motionApi.getProject(projectId).then(applyView).catch((err) => setError(err.message));
+    }, 120);
+  }, [applyView, projectId]);
+
+  const refreshAssets = useCallback(() => motionApi.listAssets(projectId).then(setAssets).catch(() => null), [projectId]);
+  const refreshKits = useCallback(() => motionApi.listKits().then(setKits).catch(() => null), []);
+
+  const loadAll = useCallback(async () => {
+    const [v, chat] = await Promise.all([motionApi.getProject(projectId), motionApi.getChat(projectId)]);
+    applyView(v);
+    setLog(chat.log);
+    setRunning(chat.running);
+    seqRef.current = chat.seq;
+    bootRef.current = chat.boot;
+  }, [applyView, projectId]);
+
+  useEffect(() => {
+    setLoaded(false);
+    loadAll()
+      .then(() => setLoaded(true))
+      .catch((err) => setError(err.message));
+    void refreshAssets();
+    void refreshKits();
+  }, [loadAll, refreshAssets, refreshKits]);
+
+  // live updates
+  useEffect(() => {
+    if (!loaded) return;
+    let stopped = false;
+    const ctrl = new AbortController();
+    const apply = (op: HubOp) => {
+      switch (op.op) {
+        case "add":
+          setLog((l) => (l.some((e) => e.id === op.entry.id) ? l : [...l, op.entry]));
+          break;
+        case "patch":
+          setLog((l) => l.map((e) => (e.id === op.id ? ({ ...e, ...op.fields } as LogEntry) : e)));
+          break;
+        case "append":
+          setLog((l) => l.map((e) => (e.id === op.id && "text" in e ? ({ ...e, text: e.text + op.text } as LogEntry) : e)));
+          break;
+        case "project":
+          refreshView();
+          break;
+        case "running":
+          setRunning(op.running);
+          if (!op.running) {
+            refreshView();
+            void refreshAssets();
+          }
+          break;
+        case "export":
+          setJob(op.job);
+          if (op.job.state === "done") refreshView();
+          break;
+        case "kits":
+          void refreshKits();
+          break;
+        case "voice":
+          setVoiceJob(op.job);
+          if (op.job.state !== "running" && op.job.state !== "queued") refreshView();
+          break;
+      }
+    };
+    (async () => {
+      while (!stopped) {
+        try {
+          const res = await motionApi.events(projectId, seqRef.current, bootRef.current, ctrl.signal);
+          if (res.events.some((e) => e.op === "reload")) {
+            await loadAll();
+            continue;
+          }
+          for (const op of res.events) {
+            apply(op);
+            seqRef.current = Math.max(seqRef.current, op.seq);
+          }
+        } catch {
+          if (stopped) return;
+          await sleep(2000);
+        }
+      }
+    })();
+    return () => {
+      stopped = true;
+      ctrl.abort();
+    };
+  }, [loaded, loadAll, projectId, refreshAssets, refreshKits, refreshView]);
+
+  // a click outside an open menu, or Escape, closes it
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest(".mo-menu-wrap")) setMenu(null);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMenu(null);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
+  const bundle = view?.bundle;
+  // scenes Claude still has to write (the promo and the end screen come with the app), for Continue building
+  const buildable = bundle ? bundle.scenes.filter(isBuildable) : [];
+  const unwritten = buildable.filter((s) => !s.source).length;
+  useEffect(() => {
+    if (!bundle) return;
+    if (!selected || !bundle.scenes.some((s) => s.id === selected)) setSelected(bundle.scenes[0]?.id ?? null);
+  }, [bundle, selected]);
+
+  const settings = view?.project.settings;
+  const model = settings?.model || health?.defaultModel || "claude-opus-5-5";
+  const effort = settings?.effort || health?.defaultEffort || "high";
+  const engine = settings?.engine || health?.defaultEngine || "claude-code";
+
+  async function send(msg: SendInput & { comment?: CommentTarget }) {
+    await motionApi.send(projectId, { ...msg, model, effort, engine });
+    setRunning(true);
+  }
+
+  async function act(fn: () => Promise<unknown>) {
+    setError(null);
+    try {
+      await fn();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  const patch = (body: Record<string, unknown>) => act(async () => applyView(await motionApi.patchProject(projectId, body)));
+
+  async function command(cmd: Command) {
+    if (cmd === "export") await act(async () => setJob(await motionApi.startExport(projectId, 1080)));
+    else if (cmd === "undo") await act(async () => applyView(await motionApi.undo(projectId)));
+    else if (cmd === "clear") await act(() => motionApi.newChat(projectId));
+    else if (cmd === "new") await act(async () => onOpen((await motionApi.createProject({ brandKitId: view?.project.brandKitId })).project.id));
+  }
+
+  if (!view || !bundle) {
+    return <div className="mo-loading">{error ? <p className="error">{error}</p> : <span className="spinner" />}</div>;
+  }
+
+  const sceneIndex = bundle.scenes.findIndex((s) => s.id === selected);
+  const scene = sceneIndex >= 0 ? bundle.scenes[sceneIndex] : null;
+  const kit = kits.find((k) => k.id === view.project.brandKitId) ?? null;
+  const audioAssets = assets.filter((a) => a.kind === "audio");
+  const exporting = job?.state === "queued" || job?.state === "running";
+  const voicing = voiceJob?.state === "queued" || voiceJob?.state === "running";
+  const narrated = bundle.scenes.filter((s) => s.narration && s.kind !== "endscreen");
+  const voicedCount = narrated.filter((s) => s.voiced).length;
+  const destination = destinationOf(view);
+
+  /** Moves the selection to the scene before or after this one (the preview follows). */
+  const stepScene = (delta: number) => {
+    const next = bundle.scenes[sceneIndex + delta];
+    if (next) setSelected(next.id);
+  };
+
+  /** Uploads a music file for the export's music bed and selects it. */
+  const uploadMusic = (file: File) =>
+    act(async () => {
+      const saved = await motionApi.uploadAssets(projectId, [file]);
+      await refreshAssets();
+      const name = saved.find((a) => a.kind === "audio")?.name ?? saved[0]?.name;
+      if (name) applyView(await motionApi.patchProject(projectId, { audio: name }));
+    });
+
+  return (
+    <div className="mo-editor">
+      <header className="mo-top">
+        <button type="button" className="btn btn-small" onClick={onBack} title="All videos">
+          ← Videos
+        </button>
+        <input
+          id="mo-title"
+          className="mo-title"
+          value={title}
+          aria-label="Video title"
+          onChange={(e) => setTitle(e.target.value)}
+          onBlur={() => title.trim() && title !== view.project.title && void patch({ title })}
+          onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+        />
+        <select
+          className="mo-select"
+          value={view.project.aspect}
+          disabled={running}
+          aria-label="Aspect ratio"
+          onChange={(e) => {
+            const aspect = e.target.value as Aspect;
+            if (bundle.scenes.some((s) => s.source) && !window.confirm(`The scenes are laid out for ${view.project.aspect}. Switch to ${aspect}? Ask Claude to adapt them afterwards.`)) return;
+            void patch({ aspect });
+          }}
+        >
+          {(health?.aspects ?? ["9:16", "16:9", "1:1", "4:5"]).map((a) => (
+            <option key={a} value={a}>
+              {a}
+            </option>
+          ))}
+        </select>
+        <select
+          className="mo-select"
+          value={view.project.brandKitId ?? ""}
+          disabled={running}
+          aria-label="Brand kit"
+          onChange={(e) => {
+            if (e.target.value === "__new") setKitEditor({ kit: null });
+            else void patch({ brandKitId: e.target.value || null });
+          }}
+        >
+          {kits.map((k) => (
+            <option key={k.id} value={k.id}>
+              {k.name}
+            </option>
+          ))}
+          <option value="__new">+ New brand kit…</option>
+        </select>
+        {kit ? (
+          <button type="button" className="btn btn-small" onClick={() => setKitEditor({ kit })} title="Edit this brand kit (every video that uses it changes)">
+            Edit kit
+          </button>
+        ) : null}
+        <div className="mo-menu-wrap">
+          <button
+            type="button"
+            className={`btn btn-small mo-video-btn ${menu === "video" ? "btn-on" : ""}`}
+            onClick={() => setMenu(menu === "video" ? null : "video")}
+            title="Made for YouTube or Udemy, the logo, web address, promo and end screen, and the target length"
+          >
+            <span className={`mo-dest mo-dest-${destination}`} aria-hidden="true" />
+            {destination === "udemy" ? "For Udemy" : "For YouTube"}
+          </button>
+          {menu === "video" ? (
+            <div className="mo-menu mo-menu-left mo-video-menu">
+              <VideoSettings view={view} disabled={running} onPatch={(body) => patch(body)} />
+            </div>
+          ) : null}
+        </div>
+        <span className="mo-spacer" />
+        <div className="mo-menu-wrap">
+          <button type="button" className={`btn btn-small ${menu === "settings" ? "btn-on" : ""}`} onClick={() => setMenu(menu === "settings" ? null : "settings")}>
+            Claude
+          </button>
+          {menu === "settings" ? (
+            <div className="mo-menu">
+              <label className="mo-field">
+                <span className="label">Engine</span>
+                <select value={engine} onChange={(e) => void patch({ settings: { engine: e.target.value } })}>
+                  <option value="claude-code" disabled={health ? !health.claudeCode.ready : false}>
+                    Claude Code (your Claude plan){health && !health.claudeCode.ready ? " - not installed" : ""}
+                  </option>
+                  <option value="api">API key (billed per token)</option>
+                </select>
+              </label>
+              {engine === "claude-code" && health && !health.claudeCode.loggedIn ? (
+                <p className="error small">Claude Code isn't logged in on this computer: run <code>claude</code> in a terminal once and log in.</p>
+              ) : null}
+              <label className="mo-field">
+                <span className="label">Model</span>
+                <select value={model} onChange={(e) => void patch({ settings: { model: e.target.value } })}>
+                  {(health?.models ?? []).map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="mo-field">
+                <span className="label">Effort</span>
+                <select value={effort} onChange={(e) => void patch({ settings: { effort: e.target.value } })}>
+                  {(health?.efforts ?? ["low", "medium", "high", "xhigh"]).map((x) => (
+                    <option key={x} value={x}>
+                      {x}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="muted small">
+                Higher effort writes better scenes and uses more.{" "}
+                {view.totals.cost ? `API spend on this video: about ${view.totals.cost.toFixed(2)}. ` : ""}
+                {view.totals.planCost ? `Claude Code usage so far: about ${view.totals.planCost.toFixed(2)} at API prices (counted against your plan, not billed per token).` : ""}
+              </p>
+              <button type="button" className="btn btn-small" disabled={running} onClick={() => (setMenu(null), void command("clear"))}>
+                New chat (keeps the scenes)
+              </button>
+            </div>
+          ) : null}
+        </div>
+        <button type="button" className="btn btn-small" onClick={() => setScriptOpen(true)} title="The narration, chapters and Claude's documents">
+          Script
+        </button>
+        {narrated.length ? (
+          <div className="mo-menu-wrap">
+            <button type="button" className={`btn btn-small ${menu === "voice" ? "btn-on" : ""}`} onClick={() => setMenu(menu === "voice" ? null : "voice")} title="Generate the narration with your ElevenLabs voice">
+              {voicing ? `Voice ${voiceJob?.done ?? 0}/${voiceJob?.total ?? 0}` : `Voice ${voicedCount}/${narrated.length}`}
+            </button>
+            {menu === "voice" ? (
+              <div className="mo-menu mo-voice-menu">
+                <VoicePanel projectId={projectId} job={voiceJob} disabled={running} version={view.project.version} onError={setError} />
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        <button
+          type="button"
+          className="btn btn-small"
+          disabled={!view.undo || running}
+          onClick={() => void command("undo")}
+          title={view.undo ? `Undo: ${view.undo.label.replace("Before: ", "")} (${ago(view.undo.at)})` : "Nothing to undo"}
+        >
+          Undo
+        </button>
+        <div className="mo-menu-wrap">
+          <button type="button" className="btn btn-primary btn-small" onClick={() => setMenu(menu === "export" ? null : "export")}>
+            {exporting ? `Exporting ${Math.round(job?.percent ?? 0)}%` : "Export"}
+          </button>
+          {menu === "export" ? (
+            <div className="mo-menu mo-export">
+              <ExportPanel
+                job={job}
+                view={view}
+                audioAssets={audioAssets}
+                exporting={exporting}
+                voiceName={health?.voice?.name ?? null}
+                onStart={(res, opts) => act(async () => setJob(await motionApi.startExport(projectId, res, opts)))}
+                onCancel={() => act(() => motionApi.cancelExport(projectId))}
+                onAudio={(name) => patch({ audio: name || null })}
+                onUploadMusic={uploadMusic}
+                onOpen={(m) => setMenu(m)}
+              />
+            </div>
+          ) : null}
+        </div>
+      </header>
+      {exporting ? (
+        <div className="bar mo-top-bar" aria-hidden="true">
+          <div className="bar-fill" style={{ width: `${job?.percent ?? 0}%` }} />
+        </div>
+      ) : null}
+      {error ? (
+        <div className="banner banner-error mo-banner" role="alert">
+          {error}{" "}
+          <button type="button" className="linkish" onClick={() => setError(null)}>
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+      {health && engine === "api" && !health.claude.ready ? (
+        <div className="banner banner-warn mo-banner">
+          No Claude API key found. Put <code>ANTHROPIC_API_KEY=...</code> in <code>backend\.env</code> (or set it in your environment) and restart the app.
+        </div>
+      ) : null}
+
+      <div className="mo-body">
+        <section className="mo-left">
+          <Chat
+            projectId={projectId}
+            log={log}
+            running={running}
+            assets={assets}
+            initialDraft={draft}
+            onSend={send}
+            onStop={() => void motionApi.stop(projectId)}
+            onCommand={(c) => void command(c)}
+            onAssetsChanged={() => void refreshAssets()}
+            blocked={null}
+            unwritten={unwritten}
+            written={buildable.length - unwritten}
+          />
+        </section>
+        <section className="mo-right">
+          <Preview
+            bundle={bundle}
+            selectedScene={selected}
+            onSelectScene={setSelected}
+            commentDisabled={running}
+            onComment={(target, text) => void act(() => send({ text, attachments: [], comment: target }))}
+          />
+          {scene ? (
+            <PropsPanel
+              key={scene.id}
+              projectId={projectId}
+              scene={scene}
+              index={sceneIndex}
+              count={bundle.scenes.length}
+              onStep={stepScene}
+              assets={assets}
+              transitions={health?.transitions ?? ["cut", "fade", "slide-up", "slide-left", "zoom", "wipe"]}
+              disabled={running}
+              paper={bundle.theme === "paper"}
+              onSaved={applyView}
+            />
+          ) : null}
+        </section>
+      </div>
+
+      {scriptOpen ? <ScriptModal projectId={projectId} onClose={() => setScriptOpen(false)} /> : null}
+      {kitEditor ? (
+        <BrandKitEditor
+          kit={kitEditor.kit}
+          copyFrom={kitEditor.copyFrom}
+          onClose={() => setKitEditor(null)}
+          onSaved={(k) => {
+            setKitEditor(null);
+            void refreshKits();
+            if (!kitEditor.kit) void patch({ brandKitId: k.id });
+            else refreshView();
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The export menu. The sound is spelled out because "Soundtrack" read as "pick the voice here": the
+ * narration (the generated voice) and the paper sounds are mixed in on their own, and the music bed is
+ * a separate, optional file the user uploads (Motion has no built-in music).
+ */
+function ExportPanel({
+  job,
+  view,
+  audioAssets,
+  exporting,
+  voiceName,
+  onStart,
+  onCancel,
+  onAudio,
+  onUploadMusic,
+  onOpen,
+}: {
+  job: ExportJob | null;
+  view: ProjectView;
+  audioAssets: Asset[];
+  exporting: boolean;
+  voiceName: string | null;
+  onStart: (res: number, opts: { narration: boolean; sfx: boolean }) => void;
+  onCancel: () => void;
+  onAudio: (name: string) => void;
+  onUploadMusic: (file: File) => Promise<void>;
+  onOpen: (menu: "voice" | "video") => void;
+}) {
+  const [res, setRes] = useState(1080);
+  const [withVoice, setWithVoice] = useState(true);
+  const [withSfx, setWithSfx] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const b = view.bundle;
+  const unfinished = b.scenes.filter((s) => isBuildable(s) && !s.source).length;
+  const narrated = b.scenes.filter((s) => s.narration && s.kind !== "endscreen");
+  const voiced = narrated.filter((s) => s.voiced).length;
+  const paper = b.theme === "paper";
+  const minutes = Math.round(b.duration / 60);
+  const estimate = Math.max(1, Math.round((b.duration * 30 * (res === 2160 ? 0.3 : 0.1)) / 60));
+
+  return (
+    <>
+      {exporting && job ? (
+        <div className="mo-export-run">
+          <div className="status-line">
+            <span className="spinner" aria-hidden="true" /> {job.message}
+          </div>
+          <div className="bar">
+            <div className="bar-fill" style={{ width: `${job.percent}%` }} />
+          </div>
+          <button type="button" className="btn btn-small" onClick={onCancel}>
+            Cancel export
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="mo-field">
+            <span className="label">Resolution</span>
+            <div className="mo-seg">
+              {[1080, 2160, 720].map((r) => (
+                <button key={r} type="button" className={res === r ? "on" : ""} onClick={() => setRes(r)}>
+                  {r === 2160 ? "4K" : `${r}p`}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="mo-field">
+            <span className="label">Sound</span>
+            {narrated.length ? (
+              <label className="mo-check-row">
+                <input type="checkbox" checked={withVoice} onChange={(e) => setWithVoice(e.target.checked)} />
+                <span>
+                  <span className="mo-check-title">Narration{voiceName ? ` (${voiceName})` : ""}</span>
+                  {voiced === narrated.length ? (
+                    <span className="muted small">
+                      Included: {voiced} of {narrated.length} scenes voiced.
+                    </span>
+                  ) : (
+                    <span className="mo-warn-text small">
+                      {voiced} of {narrated.length} scenes voiced; the rest would be silent.{" "}
+                      <button type="button" className="linkish" onClick={() => onOpen("voice")}>
+                        Open Voice
+                      </button>
+                    </span>
+                  )}
+                </span>
+              </label>
+            ) : (
+              <p className="muted small">No narration in this video.</p>
+            )}
+            {paper ? (
+              <label className="mo-check-row">
+                <input type="checkbox" checked={withSfx} onChange={(e) => setWithSfx(e.target.checked)} />
+                <span>
+                  <span className="mo-check-title">Paper sounds</span>
+                  <span className="muted small">Rips, page turns, pops, stamps and pencil.</span>
+                </span>
+              </label>
+            ) : null}
+          </div>
+          <div className="mo-field">
+            <label className="label" htmlFor="mo-music">
+              Music under the voice (optional)
+            </label>
+            <div className="mo-music-row">
+              <select id="mo-music" value={view.project.audio ?? ""} onChange={(e) => onAudio(e.target.value)}>
+                <option value="">No music</option>
+                {audioAssets.map((a) => (
+                  <option key={a.name} value={a.name}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="btn btn-small" disabled={uploading} onClick={() => fileRef.current?.click()}>
+                {uploading ? <span className="spinner" /> : "Upload…"}
+              </button>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg"
+                hidden
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!f) return;
+                  setUploading(true);
+                  void onUploadMusic(f).finally(() => setUploading(false));
+                }}
+              />
+            </div>
+            <span className="muted small">Motion has no built-in music. Upload an MP3 or WAV you have the rights to; it plays quietly under the voice.</span>
+          </div>
+          <p className="mo-closing-line small">
+            {closingSummary(view)}{" "}
+            <button type="button" className="linkish" onClick={() => onOpen("video")}>
+              Change
+            </button>
+          </p>
+          {unfinished ? (
+            <p className="error small">
+              {unfinished} scene{unfinished > 1 ? "s are" : " is"} not written yet.
+            </p>
+          ) : null}
+          <button type="button" className="btn btn-primary" disabled={!!unfinished || !b.scenes.length} onClick={() => onStart(res, { narration: withVoice, sfx: withSfx })}>
+            Export MP4
+          </button>
+          <p className="muted small">
+            H.264 at 30 fps, {clock(b.duration)} long. Unchanged scenes are reused from the last export, so re-exports after small edits are quick.
+            {b.duration > 300 ? ` ${articleFor(minutes) === "an" ? "An" : "A"} ${minutes} minute video takes a while the first time (about ${estimate} min at this resolution).` : ""}
+          </p>
+        </>
+      )}
+      {job?.state === "done" && job.result ? (
+        <div className="mo-export-done">
+          <a className="btn btn-primary btn-small" href={job.result.url} download>
+            Download MP4
+          </a>
+          <span className="muted small">
+            {job.result.width}x{job.result.height}, {job.result.seconds} s, {bytesLabel(job.result.bytes)}, made in {job.result.took} s ({job.result.renderedScenes} rendered,{" "}
+            {job.result.cachedScenes} reused)
+          </span>
+        </div>
+      ) : null}
+      {job?.state === "error" ? <p className="error small">{job.message}</p> : null}
+      {view.renders.length ? (
+        <div className="mo-renders">
+          <span className="label">Earlier exports</span>
+          {view.renders.map((r) => (
+            <a key={r.file} href={r.url} download>
+              {r.file} <span className="muted">({bytesLabel(r.bytes)}, {ago(r.at)})</span>
+            </a>
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+}

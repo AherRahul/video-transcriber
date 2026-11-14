@@ -3,8 +3,14 @@
 Paste a video link and get a transcript with timestamps. You can copy it, search it, or download it as
 `.txt`, `.srt` or `.vtt`.
 
-The app runs **on your own computer** at http://127.0.0.1:8765. Nothing is sent to an outside AI
-service, and there is no account, API key or cost per video.
+The app runs **on your own computer** at http://127.0.0.1:8765. Transcribing sends nothing to an outside
+AI service, and there is no account, API key or cost per video.
+
+It also has **Motion** ([section 6](#6-motion-animated-videos-made-by-claude)): describe a short animated
+video and Claude writes it as code, which plays live next to the chat and exports to MP4, from short clips
+to narrated 10 to 30 minute explainers in the AlgoInsight daily-film look. Motion is the one part that uses
+outside AI services: Claude (through Claude Code with your Claude login, or an API key) and ElevenLabs for
+the narration voice.
 
 ---
 
@@ -15,14 +21,15 @@ service, and there is no account, API key or cost per video.
 3. [Installation (once)](#3-installation-once)
 4. [Starting the app](#4-starting-the-app)
 5. [Using the app](#5-using-the-app)
-6. [Speech models: speed and accuracy](#6-speech-models-speed-and-accuracy)
-7. [Which sites work](#7-which-sites-work)
-8. [Keeping it working (updates)](#8-keeping-it-working-updates)
-9. [Troubleshooting](#9-troubleshooting)
-10. [For developers](#10-for-developers)
-11. [Cost, privacy and fair use](#11-cost-privacy-and-fair-use)
-12. [Hosting it online](#12-hosting-it-online)
-13. [Uninstalling](#13-uninstalling)
+6. [Motion: animated videos made by Claude](#6-motion-animated-videos-made-by-claude)
+7. [Speech models: speed and accuracy](#7-speech-models-speed-and-accuracy)
+8. [Which sites work](#8-which-sites-work)
+9. [Keeping it working (updates)](#9-keeping-it-working-updates)
+10. [Troubleshooting](#10-troubleshooting)
+11. [For developers](#11-for-developers)
+12. [Cost, privacy and fair use](#12-cost-privacy-and-fair-use)
+13. [Hosting it online](#13-hosting-it-online)
+14. [Uninstalling](#14-uninstalling)
 
 ---
 
@@ -224,7 +231,7 @@ cd backend
 
 </details>
 
-**To start with a different default speech model** (see [section 6](#6-speech-models-speed-and-accuracy)):
+**To start with a different default speech model** (see [section 7](#7-speech-models-speed-and-accuracy)):
 
 ```powershell
 $env:WHISPER_MODEL = "base"; .\backend\run.ps1
@@ -254,7 +261,7 @@ $env:WHISPER_MODEL = "base"; .\backend\run.ps1
 | Option | When to use it |
 |--------|----------------|
 | **Language** | Leave empty to detect it automatically. Type a code (`en`, `hi`, `fr`, `de`…) to pick that caption language, or to tell Whisper which language is spoken. |
-| **Speech model** | Only used for videos without captions. Faster or more accurate, see [section 6](#6-speech-models-speed-and-accuracy). |
+| **Speech model** | Only used for videos without captions. Faster or more accurate, see [section 7](#7-speech-models-speed-and-accuracy). |
 | **Ignore the video's captions** | Always use speech-to-text, for example when the automatic captions are poor. |
 
 The first time a speech model is used, it is downloaded from Hugging Face (`small` is ~460 MB, about
@@ -285,7 +292,149 @@ Nothing leaves your computer: the prompt is written in the page.
 
 ---
 
-## 6. Speech models: speed and accuracy
+## 6. Motion: animated videos made by Claude
+
+Open the **Motion** tab at the top of the page. Motion makes two kinds of video:
+
+- **Short clips** (a 6-second logo sting, a 30-second reel, an animated chart): describe it in one sentence,
+  pick a look from the cards Claude shows, and watch the scenes appear.
+- **Narrated explainers of 10 to 30 minutes in the AlgoInsight daily-film look**: graph paper, the logo card,
+  torn labels, sticky notes, stamps, red pen, page tears and turns, the end screen, read by the YouTube
+  voice (Pooja on ElevenLabs Eleven v4). Attach a competitor's transcript and Motion makes **its own
+  version**: every point the transcript teaches, in its own story, examples and words, at about the same
+  length (never under 10 or over 30 minutes).
+
+Claude writes every scene as code (HTML, CSS and a GSAP animation), checks its own work (a layout report
+for every scene at every cue: text off the frame or in the logo, label, title or narrator zones,
+overlapping or tiny text, too many words) and fixes what it finds. It is not a video-generation model: it
+animates text, shapes, diagrams, charts, icons and your images; it can't make realistic footage or people,
+run programs or record screens (where a real recording belongs it leaves a marked placeholder).
+
+### Setting it up (once)
+
+1. **The Python packages** (the Claude Agent SDK with Claude Code inside it, Anthropic's SDK, Playwright,
+   uploads):
+
+   ```powershell
+   .\backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+   ```
+
+2. **Claude.** Motion runs on **Claude Code with your Claude login** by default (your plan, not per-token
+   billing). If Claude Code has never been logged in on this computer, open a terminal, run `claude` and log
+   in once. Motion doesn't load your personal Claude Code settings, memory or hooks, and its Claude can only
+   touch the video (and search the web for facts). To use an **API key** instead, choose *API key* under
+   **Claude** in the editor and put `ANTHROPIC_API_KEY=sk-ant-...` in `backend\.env`.
+3. **The voice.** Put your ElevenLabs key in `backend\.env` (the file is ignored by Git):
+
+   ```
+   ELEVENLABS_API_KEY=...
+   ```
+
+   Restart the app afterwards. Audio is only made when you press **Generate voice**; Claude can't.
+4. **Rebuild the page** (`cd frontend; npm install; npm run build`), which also builds `motion-player.html`,
+   the page that plays the videos.
+5. **A browser for exports.** The export uses the Microsoft Edge (or Chrome) already on the computer, in the
+   background. Without either, run `.\backend\.venv\Scripts\python.exe -m playwright install chromium`.
+
+### A narrated explainer, step by step
+
+1. **Start** with the *AlgoInsight daily (narrated)* starter, or **Make a Motion video** under a finished
+   transcript (it opens in the paper look with the transcript attached). A timed transcript sets the
+   **target**: its own length, held to 10 to 30 minutes. Its timed lines become the **points to cover**.
+2. Claude **checks the facts** (web search when it runs on Claude Code) and writes them to FACTS.md, plans
+   the **storyboard** in parts with one running story, writes the **script** for every scene (three passes,
+   simple English, the voice rules: no digits, dashes, brackets, symbols or SSML), and sets the
+   **pronunciations** for every short form (AI said A-I, LLM said L-L-M, ...). Each scene names the source
+   times it teaches.
+3. **The script check.** No scene code is written until the script passes three checks:
+   - **Length:** the video runs 90 to 150 percent of the target.
+   - **Coverage:** every timed line of the source is taught by some scene, or skipped with a reason (a
+     greeting, an ad, a plug for their channel).
+   - **Own words:** no run of eight or more of the source's words in a row.
+4. **Script** in the top bar shows the whole narration with its parts, labels, timings, cue marks and source
+   times, the **Chapters** (one per part), the **Source coverage** and Claude's documents (FACTS.md,
+   YOUTUBE.md with titles, description, tags and the thumbnail idea). Download or copy any of them.
+5. Claude writes **every** scene, pinning every element to a `<cue/>` in the narration, then audits them. If
+   it stops part-way, Motion sends it back to the remaining scenes. If it stops again without progress
+   (or a turn hits an error), **Continue building** in the chat picks up where it left off.
+6. **Voice** in the top bar, then **Generate voice**. Each scene's narration goes to ElevenLabs with the time
+   of every character; scenes whose words didn't change reuse their audio for free. Every cue then moves to
+   its spoken word, so the whole video re-times by itself. Edit the **pronunciation table** there too.
+7. **Export** at 1080p or 4K with the narration, the paper sounds (rip, page, stamp, pop, pencil, crumple)
+   and an optional music bed mixed in.
+
+### Making and changing a video
+
+| What | How |
+|------|-----|
+| **Start** | **+ New video**, or a starter. Under a finished transcript, **Make a Motion video**. |
+| **Attach material** | The paperclip, drag and drop, or paste: images, PDFs, text files, audio. A transcript with timestamps sets the target length and the points to cover. |
+| **Pick the look** | Click a style card, or **Other / my brand** and describe it. Paper videos skip this. |
+| **Change something** | Say it in the chat ("the estimate is thirty minutes", "make part two shorter"). Claude patches only what you asked for. |
+| **Point at it** | **Comment**, then click an element in the preview and write what should change. |
+| **Edit it yourself** | The panel under the preview: a scene's narration, torn label, part, hold, transition, and its props (text, numbers, colours, images). **Code** shows the scene's source. A changed narration needs its voice again. |
+| **Undo** | Undoes Claude's last turn or your last edit, one step at a time. |
+| **Commands** | Type `/export`, `/undo`, `/clear` (a new chat that keeps the scenes) or `/new`. |
+| **Play** | Space plays and pauses (with the narration and sounds once the voice exists); left and right step one frame (Shift: one second); up and down move between scenes. **Guides** shows the safe area, **Sound** mutes the preview. |
+| **Find a scene** | The scene strip under the preview: every scene with its number, name, length and voice dot, grouped by part; the promo and the end screen are marked. The arrows in the scene panel step through scenes too. |
+| **YouTube or Udemy** | The **For YouTube / For Udemy** button in the top bar. YouTube: choose the logo card, the web address, the AlgoInsight promo and the end screen. Udemy: none of them (a Udemy film shows no website, URL, price or platform of ours), and Claude is told to leave AlgoInsight out of the narration. The target length lives there too. |
+
+### The paper look
+
+It follows the AlgoInsight film style guide: the 1600 x 900 frame, pale blue graph paper with grain, the
+logo card and tagline top-left, the film's title and the part tag top-right, the web address bottom-right,
+each page's torn black label at x 340, the content box x 140-1460 and y 150-849, and the narrator corner kept
+clear. A new part tears the last page away, the next page in a part turns over like a book's page, and the
+video ends on the paper end screen with Watch next, More from the series and Subscribe. Scenes use the
+components (cards, sticky notes, marker headings, pen notes and arrows, ink stamps, badges, recording
+windows) and the entrances (pop, unfold, tear on, write on, marker wipe, draw, stamp slam, crumple) with
+the films' timings. Arrowheads are drawn by the player on the line's real end, and the layout check also
+reports blocks of words closer than 18 px.
+
+**The AlgoInsight promo** (YouTube only, a tick in the video's settings): four narrated paper scenes of
+about a minute, before the end screen: the road from the first lesson to the first offer, nearly 700
+narrated lessons and the animations, 640+ problems in 30+ patterns and the four AI mock interviews, the AI
+mentor and the prep planner, then algoinsight.io. The claims follow the live site's home page. Its scenes
+live in `backend\motion\seed\promo`; a video gets its own copy when the promo is ticked. Its narration is
+voiced like any scene, and every voice clip is also kept in `motion-data\voice-cache`, so the same words
+are never paid for twice: the promo's minute costs nothing after the first video.
+
+### Brand kits
+
+A brand kit holds the colours by role, the fonts (Google Fonts or system fonts; Motion keeps a copy of each
+Google font in `motion-data\fonts` so every frame uses the real font), radius, motion, logo, icon, wordmark,
+tagline, end card, style notes and the theme (*plain* or *paper*). Two kits come ready: **AlgoInsight** (navy
+with the indigo-to-purple gradient) and **AlgoInsight Paper** (the daily-film look). Make your own under
+**Brand kits**, or **Read from a website**. Claude never changes an existing kit (other videos use it).
+
+### Exporting
+
+**Export**, then 1080p, 4K or 720p. The panel shows what goes in: the **narration** (included on its own
+once the voice exists; it says how many scenes are voiced), the **paper sounds**, and optional **music under
+the voice** (Motion has no built-in music: **Upload...** an MP3 or WAV you have the rights to). Every frame
+is captured in the background browser and each scene is encoded to H.264 at 30 fps, then joined; the
+narration, the sounds and any music are mixed last. Unchanged
+scenes are reused from the last export, so after a small edit only that scene (and the one that tears or
+turns from it) is rendered again. Measured on this laptop: 32 seconds of paper video at 1080p took 81 seconds
+the first time, so a 30-minute film takes roughly 40 to 50 minutes (4K about twice that). Files are under
+`motion-data\projects\<id>\renders\` and the Download button.
+
+### Models and cost
+
+**Claude** in the editor's top bar picks the engine (Claude Code or API key), the model (Claude Opus 5.5 by
+default, Sonnet 5.5 or Haiku 5.5) and the effort. Each Claude turn ends with a line of tokens and their API
+price; on Claude Code that's counted against your plan, not billed per token. ElevenLabs bills the voice by
+characters; the Voice menu says how many characters a Generate will send.
+
+### Where it is kept
+
+Everything is in the `motion-data` folder next to `backend` (ignored by Git): one folder per video with
+`project.json`, one HTML file per scene, uploads, the timed source (`source.json`), the voice clips,
+documents, the chat, undo snapshots and exports. Set `MOTION_DATA_DIR` to keep it elsewhere.
+
+---
+
+## 7. Speech models: speed and accuracy
 
 Only used for videos **without** captions.
 
@@ -304,7 +453,7 @@ Whisper uses all CPU cores, so the app transcribes **one video at a time**. Othe
 
 ---
 
-## 7. Which sites work
+## 8. Which sites work
 
 yt-dlp supports more than 1,000 sites. The full list is at
 https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md.
@@ -321,7 +470,7 @@ download this video"*. The app does not use your browser's logins or cookies.
 
 ---
 
-## 8. Keeping it working (updates)
+## 9. Keeping it working (updates)
 
 **Update yt-dlp every few weeks.** YouTube and other sites change often, and yt-dlp releases fixes
 quickly. If videos that used to work start failing, do this first:
@@ -341,7 +490,7 @@ cd frontend; npm install; npm run build; cd ..
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Problem | Cause and fix |
 |---------|---------------|
@@ -352,21 +501,21 @@ cd frontend; npm install; npm run build; cd ..
 | **http://127.0.0.1:8765 shows `{"detail":"Not Found"}`** | The page was not built. Run step 6 (`npm run build`), then restart the app. |
 | **"error while attempting to bind on address … 8765"** | The app is already running in another terminal, or something else uses port 8765. Close the other one, or find it with `Get-NetTCPConnection -LocalPort 8765`. |
 | **"FFmpeg was not found"** banner | Install it (step 2) and open a new terminal, or point to its `bin` folder: `$env:FFMPEG_LOCATION = "C:\path\to\ffmpeg\bin"`. |
-| **"The site asked for a sign-in to prove this is not a bot"** | YouTube is limiting downloads from your network. Wait and try later, and update yt-dlp (section 8). On cloud servers this happens a lot. |
+| **"The site asked for a sign-in to prove this is not a bot"** | YouTube is limiting downloads from your network. Wait and try later, and update yt-dlp (section 9). On cloud servers this happens a lot. |
 | **"This site only lets signed-in users download this video"** | For example Vimeo. Not supported. |
 | **Speech model download fails** (first run of a model) | The network blocks or drops `huggingface.co`. Try again, or copy the folder `%USERPROFILE%\.cache\huggingface\hub\models--Systran--faster-whisper-small` from a colleague's machine to the same place on yours. |
 | **"open() got an unexpected keyword argument 'metadata_errors'"** | An old copy of `transcriber.py`. Newer PyAV versions broke faster-whisper's own audio reader, and the current code decodes with FFmpeg instead. Update the project files. |
-| Transcribing is **very slow** | Use `base` or `tiny` under *Options*. Close heavy apps. Long videos without captions take minutes (section 6). |
+| Transcribing is **very slow** | Use `base` or `tiny` under *Options*. Close heavy apps. Long videos without captions take minutes (section 7). |
 | Transcript has **wrong words** or the wrong language | Set the *Language* option, or pick `medium`. For videos with poor automatic captions, tick *Ignore the video's captions*. |
 | Wrong caption language picked | Type the language code in *Options → Language*. |
-| A video worked yesterday but not today | Update yt-dlp (section 8). |
+| A video worked yesterday but not today | Update yt-dlp (section 9). |
 
 The terminal running the server shows the full error for anything the page reports as
 "Something went wrong".
 
 ---
 
-## 10. For developers
+## 11. For developers
 
 ### Run the page in development mode (live reload)
 
@@ -389,7 +538,7 @@ Open http://localhost:5180. Calls to `/api` are passed to the server on port 876
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m unittest -v          # caption parsing, track choice, formats, errors
+.\.venv\Scripts\python.exe -m unittest -v          # captions, formats, errors; Motion's store, patches, undo, hashes, chat loop
 .\.venv\Scripts\python.exe check_captions.py <url>  # can this machine read a video and its captions?
 .\.venv\Scripts\python.exe check_audio.py <url> ... # can it download the audio?
 cd ..\frontend
@@ -404,6 +553,7 @@ npx tsc -b                                          # type-check the page
 | `POST /api/jobs` with body `{ "url": "...", "language": "en", "model": "small", "forceWhisper": false }` | Starts a transcription and returns `{ "id": "..." }`. Only `url` is required. |
 | `GET /api/jobs/{id}` | `state` (`queued` / `running` / `done` / `error`), `stage`, `percent`, `message`, and `transcript` when done |
 | `GET /api/jobs/{id}/download?format=txt\|srt\|vtt&timestamps=true\|false` | The transcript as a file |
+| `/api/motion/...` | Motion: projects, scenes, undo, assets, chat (with long-polled live updates), export, brand kits. The list is at the top of `backend/motion/api.py`. |
 
 Example:
 
@@ -427,6 +577,17 @@ Invoke-RestMethod "http://127.0.0.1:8765/api/jobs/$($job.id)"
 | `frontend/src/videoPrompt.ts` | The prompt itself: the standing instructions, filled in with the video's details, its short forms and the transcript. |
 | `frontend/src/shortForms.ts` | Finds short forms (Latin letters, and English letters written in Hindi) and suggests how each is said. |
 | `frontend/src/styles.css` | Light and dark theme (follows the system setting), phone layout. |
+| `backend/motion/store.py` | Motion's projects on disk: scenes, props, storyboard, patches, undo snapshots, assets, brand kits (and the two AlgoInsight kits), the bundle the player draws, the project state Claude sees, and the checks run on every scene Claude writes. |
+| `backend/motion/prompts.py` | Claude's system prompt (how to make a video, the scene file contract, the rules) and its tools. |
+| `backend/motion/agent.py` | The chat loop on the API: streams Claude's reply into the chat, runs its tools, the style question, error handling, cost. |
+| `backend/motion/claude_code.py` | The same turn on Claude Code (the Claude Agent SDK): Motion's tools served in-process, web search for facts, your login. |
+| `backend/motion/voice.py` | Narration: the pronunciation table, cue positions, ElevenLabs with-timestamps (Pooja, Eleven v4), cue times, the narration track. |
+| `frontend/src/motion/player/paper.ts` | The paper look: the frame, torn labels, components, tear and turn, the end screen, the fx entrances and their sounds. |
+| `backend/motion/render.py` | Headless Edge/Chrome through Playwright: one frame with a layout report (for Claude's checks and posters), and the MP4 export (per-scene H.264, content-hash cache, concat, soundtrack). |
+| `backend/motion/brand.py`, `hub.py`, `jobs.py`, `api.py` | Brand kit from a website; the chat log and live updates; the export queue; the HTTP routes. |
+| `backend/test_motion.py` | Offline Motion tests (no API key, browser or network). |
+| `frontend/motion-player.html`, `frontend/src/motion/player/` | The player: builds each scene in its own shadow root with a paused GSAP timeline and shows any moment on request. The preview and the export both use it, so the MP4 matches the preview. |
+| `frontend/src/motion/` | The Motion pages: library, editor, chat, preview, properties, brand kit dialog. |
 
 ### Settings
 
@@ -434,25 +595,40 @@ Invoke-RestMethod "http://127.0.0.1:8765/api/jobs/$($job.id)"
 |----------------------|---------|--------------|
 | `WHISPER_MODEL` | `small` | Default speech model (`tiny`, `base`, `small`, `medium`) |
 | `FFMPEG_LOCATION` | found automatically | Folder that contains `ffmpeg.exe` |
+| `ANTHROPIC_API_KEY` | none | Claude's API key, for the API-key engine (or put it in `backend\.env`) |
+| `ELEVENLABS_API_KEY` | none | The ElevenLabs key for Generate voice (or put it in `backend\.env`) |
+| `MOTION_ENGINE` | `claude-code` when installed | `claude-code` (your Claude login) or `api` (an API key) |
+| `MOTION_VOICE_ID` | `fydPJq00SigRIaPxWgiS` (Pooja) | The ElevenLabs voice for new videos |
+| `MOTION_MODEL`, `MOTION_EFFORT` | `claude-opus-5-5`, `high` | Motion's default model and effort (each video can change them) |
+| `MOTION_DATA_DIR` | `motion-data` next to `backend` | Where Motion keeps its videos and brand kits |
+| `MOTION_BROWSER_CHANNEL` | `msedge`, then `chrome` | Which installed browser renders Motion's frames |
+| `MOTION_RENDER_PAGES` | `3` | Browser pages that render scenes at the same time during an export |
 
 The server listens on `127.0.0.1` only, so other computers on the network can't reach it.
 
 ---
 
-## 11. Cost, privacy and fair use
+## 12. Cost, privacy and fair use
 
 **Cost:** free, now and later. Whisper (model and code) is open source under the MIT licence.
 faster-whisper is MIT, yt-dlp is public domain, FFmpeg is GPL/LGPL, and FastAPI and React are MIT.
 There is no subscription, key or per-minute charge. OpenAI's *paid* Whisper cloud API is a
 different product and is **not** used. The only costs are your laptop's CPU time and ~0.5–1.5 GB of
-disk space for a model.
+disk space for a model. **Motion** is the exception: Claude turns count against your Claude plan (on
+Claude Code) or are billed to your Anthropic API account (with an API key), and Generate voice is billed by
+ElevenLabs per character. The chat shows each turn's tokens; the Voice menu shows the characters.
 
 **Privacy:** the audio and transcripts stay on your computer. The only outside connections are to the
 video site and, once per model, to Hugging Face for the download. Transcripts disappear when the
-server stops.
+server stops. **Motion** sends what you write in its chat, the files you attach there, the project's
+scenes and the frames Claude checks to Anthropic (through Claude Code or the API), and each scene's
+narration to ElevenLabs when you press Generate voice; the brand kit reader fetches the website you give
+it, Claude may search the web for facts, and fonts come from Google Fonts once. Motion's videos stay in
+`motion-data` on your computer.
 
-**AI:** only Whisper, a speech-to-text model, and only for videos without captions. It runs on your
-machine. There is no chatbot or language model, and nothing is summarised or rewritten.
+**AI:** for transcripts, only Whisper, a speech-to-text model, and only for videos without captions. It
+runs on your machine, and nothing is summarised or rewritten. Motion uses Claude, a language model, to
+write the videos.
 
 **Fair use:** many sites' terms limit downloading. Use this for videos you are allowed to use, such as
 your own, your company's, or public talks for personal notes. Respect copyright, and do not publish
@@ -460,7 +636,7 @@ other people's transcripts.
 
 ---
 
-## 12. Hosting it online
+## 13. Hosting it online
 
 It is built to run locally. Serverless hosts like **Netlify** and **Vercel** can host the page but
 **not** the full app:
@@ -476,10 +652,11 @@ server before you rely on it.
 
 ---
 
-## 13. Uninstalling
+## 14. Uninstalling
 
 1. Stop the app (**Ctrl + C**).
-2. Delete the `video-transcriber` folder.
+2. Delete the `video-transcriber` folder (Motion's videos are in its `motion-data` folder: copy them out first
+   if you want to keep them).
 3. Delete the downloaded speech models: `%USERPROFILE%\.cache\huggingface\hub\models--Systran--faster-whisper-*`.
 4. If you don't need them for anything else, uninstall Python 3.13, FFmpeg and Node.js from
    **Settings → Apps**, or with `winget uninstall Python.Python.3.13`,

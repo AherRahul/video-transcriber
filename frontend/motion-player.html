@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Motion player</title>
+    <style>
+      html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0b0d12; }
+      html[data-mode="render"] body { background: transparent; }
+      #stage { position: absolute; left: 0; top: 0; width: 1080px; height: 1920px; overflow: hidden; background: var(--bg, #0f1115); transform-origin: 0 0; }
+      #guides { position: absolute; left: 0; top: 0; display: none; pointer-events: none; transform-origin: 0 0; z-index: 10; }
+      #guides > div { position: absolute; border: 3px dashed rgba(255, 196, 0, 0.85); border-radius: 6px; }
+      #hover { position: fixed; display: none; pointer-events: none; z-index: 20; border: 2px solid #ffb020; border-radius: 4px; box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.18); }
+      #hover::after { content: attr(data-label); position: absolute; left: -2px; top: -24px; padding: 2px 6px; border-radius: 4px; background: #ffb020; color: #1a1300; font: 600 12px/1.4 system-ui, sans-serif; white-space: nowrap; }
+      html.commenting #stage { cursor: crosshair; }
+    </style>
+  </head>
+  <body>
+    <div id="stage"></div>
+    <div id="guides"><div></div></div>
+    <div id="hover"></div>
+    <script type="module" src="/src/motion/player/main.ts"></script>
+  </body>
+</html>
