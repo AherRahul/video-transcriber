@@ -263,6 +263,7 @@ $env:WHISPER_MODEL = "base"; .\backend\run.ps1
 | **Language** | Leave empty to detect it automatically. Type a code (`en`, `hi`, `fr`, `de`…) to pick that caption language, or to tell Whisper which language is spoken. |
 | **Speech model** | Only used for videos without captions. Faster or more accurate, see [section 7](#7-speech-models-speed-and-accuracy). |
 | **Ignore the video's captions** | Always use speech-to-text, for example when the automatic captions are poor. |
+| **Screenshots for layout references** | On by default. After the transcript, takes stills of the video with what is said at each (see [Screenshots](#screenshots-layout-references-for-motion)). Untick it to skip the video download. |
 
 The first time a speech model is used, it is downloaded from Hugging Face (`small` is ~460 MB, about
 a minute). After that it is loaded from
@@ -289,6 +290,33 @@ Claude as it is (**Copy prompt**) or save it (**.md**).
 - **Put the transcript in the prompt** adds the transcript at the end, so one paste does it all.
 
 Nothing leaves your computer: the prompt is written in the page.
+
+### Screenshots (layout references for Motion)
+
+After the transcript (captions or Whisper), the app takes **screenshots** of the video and pairs each with
+what is said then. The transcript shows at once; the **Screenshots** section under it shows the progress
+(*Downloading the video → Finding the scene changes → Taking screenshots*), then a grid of stills, each with
+its time and the line being said. Click one to see it large (left and right step through them).
+**Download all (.zip)** gives the JPEGs with `REFERENCES.md` (a table of time, file and what is said) and
+`references.json`.
+
+- **When:** at every new scene (FFmpeg's scene-change detection) and at least every 15 seconds, never two
+  within 4 seconds, at most 120 per video. Each is a JPEG 1280 wide.
+- **What is said:** the transcript lines from 4 seconds before to 6 seconds after, trimmed to about two
+  sentences.
+- **How:** a video-only stream of at most 720p is downloaded to a temp folder and deleted afterwards. If the
+  video can't be downloaded or FFmpeg fails, the transcript is still fine and the section says why there are
+  no screenshots.
+- **Where:** `transcriber-data\frames\<job id>\` next to `backend` (ignored by Git; `TRANSCRIBER_DATA_DIR`
+  moves it), so they outlive a restart. Folders older than 14 days are deleted when the app starts.
+
+**In Motion.** **Make a Motion video** takes the screenshots along (wait until they are done): they become
+the video's assets `ref-<mm>m<ss>s.jpg`, with `docs\REFERENCES.md` (time, asset, what is said). The project
+state tells Claude they exist, and its `view_references` tool shows it the screenshots for a stretch of the
+source (6 by default, up to 12), each with its time and words. Claude looks at them before designing the
+scenes that cover that part, to see what the source shows at each point and how much it puts on one screen,
+then designs its own page in the paper look. It never copies their layout, words, brand, logos, characters,
+numbers or images, and they are never shown in the video (a scene that uses one gets a warning).
 
 ---
 
@@ -359,9 +387,12 @@ run programs or record screens (where a real recording belongs it leaves a marke
    (or a turn hits an error), **Continue building** in the chat picks up where it left off.
 6. **Voice** in the top bar, then **Generate voice**. Each scene's narration goes to ElevenLabs with the time
    of every character; scenes whose words didn't change reuse their audio for free. Every cue then moves to
-   its spoken word, so the whole video re-times by itself. Edit the **pronunciation table** there too.
-7. **Export** at 1080p or 4K with the narration, the paper sounds (rip, page, stamp, pop, pencil, crumple)
-   and an optional music bed mixed in.
+   its spoken word, so the whole video re-times by itself. Edit the **pronunciation table** there too. Then
+   ask Claude to audit again: the real voice runs faster than the estimate, and the timing checks show
+   what now lands late.
+7. Claude designs the **thumbnail** at the hand-off (see below).
+8. **Export** at 1080p or 4K with the narration, the paper sounds (rip, page, stamp, pop, pencil, crumple)
+   and an optional music bed mixed in. The captions are written next to the MP4.
 
 ### Making and changing a video
 
@@ -391,6 +422,27 @@ windows) and the entrances (pop, unfold, tear on, write on, marker wipe, draw, s
 the films' timings. Arrowheads are drawn by the player on the line's real end, and the layout check also
 reports blocks of words closer than 18 px.
 
+**Animation tools** for explaining, not just revealing: a **camera** that zooms and pans to the part being
+explained and back (`fx.focus`, `fx.unfocus`); the **flow kit**: packets travelling along a path for
+requests and data on the move (`fx.flow`), any element moved along a path (`fx.travel`), a red-pen arrow
+drawn between two elements (`fx.link`), a pen ring around one (`fx.circle`), a bar or queue filling
+(`fx.grow`) and text that changes with a small pop (`fx.change`); **code walkthroughs**: one code panel,
+highlighted with line numbers, typed on line by line (`fx.code`) with a marker band moving to the lines the
+voice explains (`fx.line`). Code on screen is always copied from your files or a real run, never written up
+by Claude. An element marked `data-carry` in two scenes in a row moves across the page change instead of
+leaving with the page, and each new part opens with a short sting.
+
+**Timing checks.** Besides the layout, the audit reads each scene's timing: **still stretches** (nothing
+moves for a while as the voice talks) and **late entrances** (an element pinned to a cue with an offset
+that lands it in the next phrase, for example `cue(2) + 3.2 s` arriving 1.1 s after `cue(3)`). Claude
+fixes both, and checks again after Generate voice.
+
+**The thumbnail.** Claude designs the YouTube thumbnail as one more scene: a still on the 1600 x 900 paper
+stage, 3 to 5 very large words, one marker stroke, one focal element, high contrast, the bottom-right corner
+left clear for YouTube's time stamp, no frame chrome and no real people. It is rendered at 1280 x 720
+(JPEG) the first time it is asked for after each change and kept in `renders\thumbnail-<hash>.jpg`; undo
+covers it like the scenes. You can also edit its code and props yourself.
+
 **The AlgoInsight promo** (YouTube only, a tick in the video's settings): four narrated paper scenes of
 about a minute, before the end screen: the road from the first lesson to the first offer, nearly 700
 narrated lessons and the animations, 640+ problems in 30+ patterns and the four AI mock interviews, the AI
@@ -413,7 +465,21 @@ with the indigo-to-purple gradient) and **AlgoInsight Paper** (the daily-film lo
 once the voice exists; it says how many scenes are voiced), the **paper sounds**, and optional **music under
 the voice** (Motion has no built-in music: **Upload...** an MP3 or WAV you have the rights to). Every frame
 is captured in the background browser and each scene is encoded to H.264 at 30 fps, then joined; the
-narration, the sounds and any music are mixed last. Unchanged
+narration, the sounds and any music are mixed last.
+
+**The audio finish.** The music is **ducked** under the voice: a sidechain compressor keyed by the
+narration pulls it about 10 dB down while the voice talks and lets it back up in the pauses and page
+changes. Then the whole mix is brought to YouTube's loudness, **-14 LUFS integrated with the true peak at
+-1.5 dBTP**, in two passes: the first measures it, the second applies one linear gain (a look-ahead limiter
+first holds the few peaks that would cross the ceiling, so the gain stays linear instead of riding the
+level). The export result reports the loudness it measured and set. A video with only paper sounds keeps
+them at their own level. To leave the loudness alone, send `"loudness": false` with the export.
+
+**Captions.** Every export writes `<the MP4's name>.srt` and `.vtt` next to it, for YouTube's subtitles
+upload. They show the narration as written (LLM, not L-L-M, and no cue marks), timed by the voice: each word
+appears when the voice says it (scenes without their voice yet use the estimate). Each caption is at most two
+lines of 42 characters and stays up 1 to 7 seconds, broken at the end of a sentence first, then at a comma.
+The current captions are also at `/api/motion/projects/<id>/captions.srt` and `captions.vtt`. Unchanged
 scenes are reused from the last export, so after a small edit only that scene (and the one that tears or
 turns from it) is rendered again. Measured on this laptop: 32 seconds of paper video at 1080p took 81 seconds
 the first time, so a 30-minute film takes roughly 40 to 50 minutes (4K about twice that). Files are under
@@ -429,8 +495,9 @@ characters; the Voice menu says how many characters a Generate will send.
 ### Where it is kept
 
 Everything is in the `motion-data` folder next to `backend` (ignored by Git): one folder per video with
-`project.json`, one HTML file per scene, uploads, the timed source (`source.json`), the voice clips,
-documents, the chat, undo snapshots and exports. Set `MOTION_DATA_DIR` to keep it elsewhere.
+`project.json`, one HTML file per scene, the thumbnail (`thumbnail.html`), uploads, the timed source
+(`source.json`), the voice clips, documents, the chat, undo snapshots and exports with their captions. Set
+`MOTION_DATA_DIR` to keep it elsewhere.
 
 ---
 
@@ -550,9 +617,12 @@ npx tsc -b                                          # type-check the page
 | Call | What it does |
 |------|--------------|
 | `GET /api/health` | `{ ok, ffmpeg, models, defaultModel }` |
-| `POST /api/jobs` with body `{ "url": "...", "language": "en", "model": "small", "forceWhisper": false }` | Starts a transcription and returns `{ "id": "..." }`. Only `url` is required. |
-| `GET /api/jobs/{id}` | `state` (`queued` / `running` / `done` / `error`), `stage`, `percent`, `message`, and `transcript` when done |
+| `POST /api/jobs` with body `{ "url": "...", "language": "en", "model": "small", "forceWhisper": false, "screenshots": true }` | Starts a transcription and returns `{ "id": "..." }`. Only `url` is required. |
+| `GET /api/jobs/{id}` | `state` (`queued` / `running` / `done` / `error`), `stage`, `percent`, `message`, `transcript` when done, and `frames` (how the screenshots are going) |
 | `GET /api/jobs/{id}/download?format=txt\|srt\|vtt&timestamps=true\|false` | The transcript as a file |
+| `GET /api/jobs/{id}/frames` | The screenshots: `{ state, percent, message, items: [{ t, url, file, text }] }`. `state` is `off`, `waiting`, `running`, `done` or `none` (then `message` says why). Answered from disk after a restart. |
+| `GET /api/jobs/{id}/frames/{file}` | One screenshot (JPEG) |
+| `GET /api/jobs/{id}/frames.zip` | Every screenshot with `REFERENCES.md` and `references.json` |
 | `/api/motion/...` | Motion: projects, scenes, undo, assets, chat (with long-polled live updates), export, brand kits. The list is at the top of `backend/motion/api.py`. |
 
 Example:
@@ -568,12 +638,14 @@ Invoke-RestMethod "http://127.0.0.1:8765/api/jobs/$($job.id)"
 | File | What is in it |
 |------|---------------|
 | `backend/transcriber.py` | `transcribe_url()` runs the whole flow: `fetch_info` → `fetch_captions` (picks the track, reads json3 / VTT / SRT, follows HLS caption playlists, removes rolling repeats) → `download_audio` → `decode_audio` (FFmpeg) → `run_whisper`. Also friendly error messages and the `to_txt` / `to_srt` / `to_vtt` formats. |
+| `backend/screenshots.py` | The screenshots: `download_video` (720p video only), `scene_changes` and `pick_moments` (scene cuts plus the 15 s grid), `extract_frame`, `text_around` (what is said then), `take_screenshots` (all of that on a local file), the job folder, the zip and the 14-day clean-up. |
 | `backend/app.py` | FastAPI: the job queue (one worker thread, jobs in memory, at most 50 kept), the endpoints, and serving `frontend/dist`. |
-| `backend/test_transcriber.py` | Offline unit tests. |
+| `backend/test_transcriber.py` | Offline unit tests (the screenshots run on a test video FFmpeg makes). |
 | `frontend/src/App.tsx` | The page: form, options, progress, transcript, search, copy and download, and the video prompt under a transcript. |
 | `frontend/src/api.ts` | Calls to the server. |
 | `frontend/src/format.ts` | Time format, paragraph grouping, "open the video at this time" links. |
 | `frontend/src/PromptPanel.tsx` | The video prompt under a transcript: its details, the short forms table, copy and download. |
+| `frontend/src/Screenshots.tsx` | The Screenshots section: progress, the grid, one screenshot large, the zip. |
 | `frontend/src/videoPrompt.ts` | The prompt itself: the standing instructions, filled in with the video's details, its short forms and the transcript. |
 | `frontend/src/shortForms.ts` | Finds short forms (Latin letters, and English letters written in Hindi) and suggests how each is said. |
 | `frontend/src/styles.css` | Light and dark theme (follows the system setting), phone layout. |
@@ -600,6 +672,7 @@ Invoke-RestMethod "http://127.0.0.1:8765/api/jobs/$($job.id)"
 | `MOTION_ENGINE` | `claude-code` when installed | `claude-code` (your Claude login) or `api` (an API key) |
 | `MOTION_VOICE_ID` | `fydPJq00SigRIaPxWgiS` (Pooja) | The ElevenLabs voice for new videos |
 | `MOTION_MODEL`, `MOTION_EFFORT` | `claude-opus-5-5`, `high` | Motion's default model and effort (each video can change them) |
+| `TRANSCRIBER_DATA_DIR` | `transcriber-data` next to `backend` | Where the screenshots are kept (`frames\<job id>\`) |
 | `MOTION_DATA_DIR` | `motion-data` next to `backend` | Where Motion keeps its videos and brand kits |
 | `MOTION_BROWSER_CHANNEL` | `msedge`, then `chrome` | Which installed browser renders Motion's frames |
 | `MOTION_RENDER_PAGES` | `3` | Browser pages that render scenes at the same time during an export |

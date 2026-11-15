@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
-import { downloadUrl, getHealth, getJob, startJob, type Health, type Job } from "./api";
+import { downloadUrl, getHealth, getJob, startJob, type Frames, type Health, type Job } from "./api";
 import { clock, linkAt, paragraphs, plainText, SOURCE_HINT, SOURCE_LABEL } from "./format";
 import { motionApi, saveDraft } from "./motion/api";
 import MotionApp from "./motion/MotionApp";
 import PromptPanel from "./PromptPanel";
+import ScreenshotsView, { useFrames } from "./Screenshots";
 
 const MODEL_HINT: Record<string, string> = {
   tiny: "Fastest, least accurate",
@@ -65,6 +66,7 @@ function Transcriber() {
   const [language, setLanguage] = useState("");
   const [model, setModel] = useState("small");
   const [forceWhisper, setForceWhisper] = useState(false);
+  const [screenshots, setScreenshots] = useState(true);
   const [job, setJob] = useState<Job | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -98,6 +100,10 @@ function Transcriber() {
     };
   }, [jobId, finished]);
 
+  // The screenshots come after the transcript, with their own progress (the transcript is shown meanwhile).
+  const transcribed = job?.state === "done" && !!job.transcript;
+  const frames = useFrames(jobId ?? null, transcribed);
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     const trimmed = url.trim();
@@ -105,7 +111,7 @@ function Transcriber() {
     setStartError(null);
     setStarting(true);
     try {
-      const id = await startJob(trimmed, { language, model, forceWhisper });
+      const id = await startJob(trimmed, { language, model, forceWhisper, screenshots });
       setJob({ id, url: trimmed, state: "queued", stage: "queued", percent: null, message: "Starting" });
     } catch (err) {
       setStartError(err instanceof Error ? err.message : String(err));
@@ -189,6 +195,18 @@ function Transcriber() {
               />
               Ignore the video's captions and always use speech-to-text
             </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={screenshots}
+                onChange={(e) => setScreenshots(e.target.checked)}
+                disabled={busy}
+              />
+              <span>
+                Screenshots for layout references{" "}
+                <span className="muted">(the video at each new scene, with what is said, for Motion)</span>
+              </span>
+            </label>
           </div>
         </details>
         {startError ? (
@@ -199,7 +217,12 @@ function Transcriber() {
       </form>
 
       {job && job.state !== "done" ? <JobStatus job={job} onRetry={() => setJob(null)} /> : null}
-      {job?.state === "done" && job.transcript ? <TranscriptView job={job} /> : null}
+      {job?.state === "done" && job.transcript ? <TranscriptView job={job} frames={frames} /> : null}
+      {/* the screenshots under the transcript: their progress, then the grid */}
+      {job?.state === "done" && job.transcript ? (
+        // its own key (a sibling's key must differ from PromptPanel's), so a new job starts it afresh
+        <ScreenshotsView key={`shots-${job.id}`} jobId={job.id} videoUrl={job.transcript.url} frames={frames} />
+      ) : null}
       {/* the prompt that builds a video from this transcript, written as soon as the transcript is ready */}
       {job?.state === "done" && job.transcript ? <PromptPanel key={job.id} transcript={job.transcript} /> : null}
     </div>
@@ -242,7 +265,7 @@ function JobStatus({ job, onRetry }: { job: Job; onRetry: () => void }) {
   );
 }
 
-function TranscriptView({ job }: { job: Job }) {
+function TranscriptView({ job, frames }: { job: Job; frames: Frames | null }) {
   const t = job.transcript!;
   const [timestamps, setTimestamps] = useState(true);
   const [query, setQuery] = useState("");
@@ -250,12 +273,16 @@ function TranscriptView({ job }: { job: Job }) {
   const [making, setMaking] = useState(false);
   const copyTimer = useRef<number | undefined>(undefined);
 
-  /** A new Motion video with this transcript attached, and a first message ready to send. */
+  /** A new Motion video with this transcript attached (and its screenshots as layout references, when it has
+   *  them), and a first message ready to send. */
   async function makeVideo() {
+    const shotsReady = frames?.state === "done" && frames.items.length > 0;
+    const shotsComing = frames?.state === "running" || frames?.state === "waiting";
+    if (shotsComing && !window.confirm("The screenshots are still being taken, so they won't go with this video. Make it now without them?")) return;
     setMaking(true);
     try {
       // the daily films' look and voice, as long as the source (the transcript's own length)
-      const { project, attachments } = await motionApi.createProject({
+      const { project, attachments, references } = await motionApi.createProject({
         title: t.title,
         sourceText: plainText(t, true),
         sourceTitle: t.title,
@@ -264,9 +291,16 @@ function TranscriptView({ job }: { job: Job }) {
         aspect: "16:9",
         // the daily films run 10 to 30 minutes: a shorter source still makes a 10 minute film
         targetSeconds: t.duration ? Math.min(1800, Math.max(600, t.duration)) : undefined,
+        // the screenshots are copied in as ref-<mm>m<ss>s.jpg with docs/REFERENCES.md, for Claude to look at
+        framesJob: shotsReady ? job.id : undefined,
       });
+      const refsNote = references
+        ? " Before you design each part, look at the source's screenshots for it (view_references), then design our own pages in the paper look."
+        : "";
       saveDraft(project.id, {
-        text: "Make a narrated explainer in our daily paper look from the attached transcript. Teach every point it covers, but build our own version: our own running story and examples, our own sentences, a systematic order, simple and easy English in a warm human voice, every fact checked in FACTS.md. The script first, then every scene, then the YouTube details.",
+        text:
+          "Make a narrated explainer in our daily paper look from the attached transcript. Teach every point it covers, but build our own version: our own running story and examples, our own sentences, a systematic order, simple and easy English in a warm human voice, every fact checked in FACTS.md. The script first, then every scene, then the YouTube details." +
+          refsNote,
         attachments,
       });
       window.location.hash = `#/motion/${project.id}`;
@@ -324,7 +358,17 @@ function TranscriptView({ job }: { job: Job }) {
           <a className="btn" href={downloadUrl(job.id, "vtt", true)}>
             .vtt
           </a>
-          <button type="button" className="btn" onClick={() => void makeVideo()} disabled={making} title="Start a Motion video with this transcript attached">
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void makeVideo()}
+            disabled={making}
+            title={
+              frames?.state === "done" && frames.items.length
+                ? "Start a Motion video with this transcript and its screenshots attached"
+                : "Start a Motion video with this transcript attached"
+            }
+          >
             {making ? "Opening…" : "Make a Motion video"}
           </button>
         </div>

@@ -1,9 +1,32 @@
-"""Offline tests for the caption parsing, track choice and output formats. Run: python -m unittest -v"""
+"""Offline tests for the caption parsing, track choice and output formats, and the screenshots (on a test
+video FFmpeg makes, never downloaded). Run: python -m unittest -v"""
 
 import json
+import os
+import shutil
+import tempfile
 import unittest
 
-import transcriber as tr
+# the screenshots (and the Motion part of the app) work under one temporary folder, deleted at the end,
+# never in transcriber-data or motion-data
+TMP = tempfile.mkdtemp(prefix="transcriber-test-")
+os.environ["TRANSCRIBER_DATA_DIR"] = os.path.join(TMP, "data")
+os.environ["MOTION_DATA_DIR"] = os.path.join(TMP, "motion-data")
+os.environ["MOTION_ENGINE"] = "api"
+
+import io  # noqa: E402
+import subprocess  # noqa: E402
+import time  # noqa: E402
+import zipfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+from unittest import mock  # noqa: E402
+
+import screenshots as shots  # noqa: E402
+import transcriber as tr  # noqa: E402
+
+
+def tearDownModule():
+    shutil.rmtree(TMP, ignore_errors=True)
 
 
 class ParseCaptions(unittest.TestCase):
@@ -107,6 +130,235 @@ class Errors(unittest.TestCase):
             tr.transcribe_url("file:///etc/passwd")
         with self.assertRaises(tr.TranscriptError):
             tr.transcribe_url("https://example.com/v.mp4", model="huge")
+
+
+# ── screenshots ──
+
+
+class PickMoments(unittest.TestCase):
+    def test_scene_cuts_plus_the_grid(self):
+        # shots start at 0, 8, 20 and 22 in a 40 s video: the opening at 1 s, each cut 0.5 s after it, and
+        # the grid at 15 and 30. The 2 s flash at 20 is 2 s from the long shot at 22, which wins.
+        self.assertEqual(shots.pick_moments([8, 20, 22], 40), [1.0, 8.5, 15.0, 22.5, 30.0])
+
+    def test_the_grid_gives_way_to_a_cut(self):
+        self.assertEqual(shots.pick_moments([14], 40), [1.0, 14.5, 30.0])  # 15 is 0.5 s from 14.5
+        self.assertEqual(shots.pick_moments([], 40), [1.0, 15.0, 30.0])
+
+    def test_no_two_closer_than_four_seconds(self):
+        cuts = [0.5 + i * 1.7 for i in range(60)]  # a cut every 1.7 s
+        moments = shots.pick_moments(cuts, 120)
+        self.assertEqual(moments, sorted(moments))
+        self.assertTrue(all(b - a >= 4 for a, b in zip(moments, moments[1:])), moments)
+        self.assertLessEqual(moments[-1], 120 - 0.25)
+
+    def test_the_cap_keeps_the_whole_video(self):
+        moments = shots.pick_moments([i * 5.0 for i in range(1, 200)], 1000)  # 200 shots
+        self.assertEqual(len(moments), 120)
+        self.assertEqual(moments[0], 1.0)  # first and last kept
+        self.assertGreater(moments[-1], 990)
+        self.assertTrue(all(b - a >= 4 for a, b in zip(moments, moments[1:])))
+        self.assertEqual(len(shots.pick_moments([i * 5.0 for i in range(1, 200)], 1000, cap=10)), 10)
+
+    def test_short_videos(self):
+        self.assertEqual(shots.pick_moments([], 0.2), [])
+        self.assertEqual(shots.pick_moments([], 3), [1.0])
+        self.assertEqual(shots.pick_moments([2.0], 3), [1.0])  # the cut is too close to the opening
+
+
+class TextAround(unittest.TestCase):
+    segs = [
+        tr.Segment(0, 3, "Hello and welcome."),
+        tr.Segment(3, 7, "Today we look at queues. They hold work"),
+        tr.Segment(7, 11, "until a worker is free. [Music] Then the worker takes one."),
+        tr.Segment(11, 16, "And that is the whole idea. Next we add a second worker."),
+        tr.Segment(40, 44, "so the line gets shorter"),
+    ]
+
+    def test_the_sentence_being_said_and_the_next(self):
+        self.assertEqual(shots.text_around(self.segs, 8.5), "They hold work until a worker is free. Then the worker takes one.")
+        self.assertEqual(shots.text_around(self.segs, 1.0), "Hello and welcome. Today we look at queues. They hold work")
+
+    def test_only_what_is_said_around_it(self):
+        # [t - 4, t + 6]: at 30 nothing is said; at 37 the line at 40 is said 3 s later
+        self.assertEqual(shots.text_around(self.segs, 30), "")
+        self.assertEqual(shots.text_around(self.segs, 37), "so the line gets shorter")
+        self.assertEqual(shots.text_around([{"start": 1, "end": 2, "text": "A dict works too."}], 1.5), "A dict works too.")
+
+    def test_auto_captions_without_full_stops_are_capped(self):
+        # 80 words over 10 s: word16 is said at 2 s, so the 40 words start four words before it
+        words = " ".join(f"word{i}" for i in range(80))
+        text = shots.text_around([tr.Segment(0, 10, words)], 2)
+        self.assertEqual(len(text.split()), 40)
+        self.assertTrue(text.startswith("...word12 word13"), text)
+        self.assertTrue(text.endswith("word51..."), text)
+
+    def test_a_long_line_starts_where_the_frame_is(self):
+        # one caption line of 12 s: at 6 s the speaker is on its second sentence, not its first
+        seg = tr.Segment(0, 12, "First we fill the tank. Then we check the tyres. Then we drive off.")
+        self.assertEqual(shots.text_around([seg], 6), "Then we check the tyres. Then we drive off.")
+        # two short sentences are under 12 words, so a third comes along
+        self.assertEqual(shots.text_around([seg], 0.2), "First we fill the tank. Then we check the tyres. Then we drive off.")
+
+
+def _jpeg_size(path: Path) -> tuple[int, int] | None:
+    from motion.store import image_size
+
+    return image_size(path)
+
+
+@unittest.skipUnless(shots.ffmpeg_exe(), "FFmpeg not found")
+class ScreenshotsOnAFile(unittest.TestCase):
+    """A 40 s test video (red 8 s, blue 12 s, a 2 s green flash, then 18 s of FFmpeg's moving test pattern),
+    so the scene cuts are at 8, 20 and 22 s."""
+
+    JOB = "abcdef123456"
+    SEGMENTS = [
+        tr.Segment(0, 4, "Welcome to the queue lesson."),
+        tr.Segment(4, 9, "A queue keeps jobs in the order they came. The first one in"),
+        tr.Segment(9, 13, "is the first one out."),
+        tr.Segment(13, 20, "Workers take jobs from the front | one at a time."),
+        tr.Segment(21, 27, "When every worker is busy, the line grows."),
+        tr.Segment(28, 36, "Add a worker and it shrinks again. That is all."),
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = Path(tempfile.mkdtemp(prefix="video-", dir=TMP))
+        cls.video = cls.dir / "test.mp4"
+        parts = [("color=c=red:", 8), ("color=c=blue:", 12), ("color=c=green:", 2), ("testsrc=", 18)]
+        cmd = [shots.ffmpeg_exe(), "-hide_banner", "-v", "error"]
+        for src, seconds in parts:
+            cmd += ["-f", "lavfi", "-i", f"{src}s=640x360:r=25:d={seconds}"]
+        cmd += ["-filter_complex", "[0][1][2][3]concat=n=4:v=1:a=0", "-c:v", "mpeg4", "-q:v", "5", "-y", str(cls.video)]
+        subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+        cls.folder = shots.FRAMES_DIR / cls.JOB
+        cls.items = shots.take_screenshots(cls.video, cls.SEGMENTS, cls.folder)
+        (cls.folder / "job.json").write_text(json.dumps({"title": "Queues, explained", "url": "https://example.com/v", "duration": 40, "state": "done", "message": "5 screenshots"}), encoding="utf-8")
+
+    def test_scene_changes(self):
+        cuts = shots.scene_changes(self.video, shots.ffmpeg_exe(), 40)
+        self.assertEqual([round(c) for c in cuts], [8, 20, 22])
+
+    def test_the_frames_and_the_manifest(self):
+        self.assertEqual([it["t"] for it in self.items], [1.0, 8.5, 15.0, 22.5, 30.0])
+        self.assertEqual([it["file"] for it in self.items], ["frame-00m01s.jpg", "frame-00m08s.jpg", "frame-00m15s.jpg", "frame-00m22s.jpg", "frame-00m30s.jpg"])
+        for it in self.items:
+            self.assertEqual(_jpeg_size(self.folder / it["file"]), (1280, 720), it["file"])  # 1280 wide
+        self.assertEqual(json.loads((self.folder / "manifest.json").read_text(encoding="utf-8")), self.items)
+        # what is said around each one: [t - 4, t + 6], trimmed to about two sentences
+        text = {it["t"]: it["text"] for it in self.items}
+        # at 8.5 s "The first one in" is being said (the line runs 4 to 9 s)
+        self.assertEqual(text[8.5], "The first one in is the first one out. Workers take jobs from the front | one at a time.")
+        self.assertEqual(text[30.0], "Add a worker and it shrinks again. That is all.")
+        self.assertEqual(text[1.0], "Welcome to the queue lesson. A queue keeps jobs in the order they came.")
+
+    def test_the_cap_on_a_file(self):
+        items = shots.take_screenshots(self.video, self.SEGMENTS, self.dir / "capped", cap=3)
+        self.assertEqual([it["t"] for it in items], [1.0, 15.0, 30.0])
+        self.assertEqual(sorted(p.name for p in (self.dir / "capped").glob("*.jpg")), ["frame-00m01s.jpg", "frame-00m15s.jpg", "frame-00m30s.jpg"])
+
+    def test_routes_serve_a_job_gone_from_memory(self):
+        from fastapi.testclient import TestClient
+
+        import app
+
+        c = TestClient(app.app)
+        self.assertNotIn(self.JOB, app._jobs)
+        r = c.get(f"/api/jobs/{self.JOB}/frames")
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["state"], "done")
+        self.assertEqual([it["t"] for it in body["items"]], [1.0, 8.5, 15.0, 22.5, 30.0])
+        self.assertEqual(body["items"][1]["url"], f"/api/jobs/{self.JOB}/frames/frame-00m08s.jpg")
+        img = c.get(body["items"][1]["url"])
+        self.assertEqual(img.status_code, 200)
+        self.assertEqual(img.headers["content-type"], "image/jpeg")
+        self.assertEqual(img.content[:2], b"\xff\xd8")
+        for bad in ("manifest.json", "..%2Fjob.json", "frame-99m99s.jpg"):
+            self.assertEqual(c.get(f"/api/jobs/{self.JOB}/frames/{bad}").status_code, 404, bad)
+        self.assertEqual(c.get("/api/jobs/000000000000/frames").status_code, 404)
+        self.assertEqual(c.get("/api/jobs/000000000000/frames.zip").status_code, 404)
+
+        z = c.get(f"/api/jobs/{self.JOB}/frames.zip")
+        self.assertEqual(z.status_code, 200)
+        self.assertIn('filename="Queues explained - screenshots.zip"', z.headers["content-disposition"])
+        names = zipfile.ZipFile(io.BytesIO(z.content)).namelist()
+        self.assertEqual(sorted(names), sorted(["REFERENCES.md", "references.json"] + [it["file"] for it in self.items]))
+        md = zipfile.ZipFile(io.BytesIO(z.content)).read("REFERENCES.md").decode()
+        self.assertIn("Source: Queues, explained (https://example.com/v)", md)
+        self.assertIn("| Time | File | What is said |", md)
+        self.assertIn("| 0:08 | frame-00m08s.jpg | The first one in is the first one out. Workers take jobs from the front \\| one at a time. |", md)
+        self.assertIn("front \\| one at a time", md)  # a | in the text can't break the table
+        refs = json.loads(zipfile.ZipFile(io.BytesIO(z.content)).read("references.json"))
+        self.assertEqual([f["time"] for f in refs["frames"]], ["0:01", "0:08", "0:15", "0:22", "0:30"])
+
+    def test_the_whole_job_on_a_local_file(self):
+        # run_for_job with the download replaced by a copy of the test video: no network
+        def fake_download(_url, folder, _progress=None):
+            return Path(shutil.copy(self.video, folder / "video.mp4"))
+
+        t = tr.Transcript("Queues", "https://example.com/v", 40, "en", "captions", list(self.SEGMENTS))
+        seen = []
+        with mock.patch.object(shots, "download_video", fake_download):
+            result = shots.run_for_job("fedcba654321", t, lambda pct, msg: seen.append((pct, msg)))
+        self.assertEqual(result, {"state": "done", "message": "5 screenshots", "count": 5})
+        found = shots.load("fedcba654321")
+        self.assertEqual((found["state"], found["title"], len(found["items"])), ("done", "Queues", 5))
+        self.assertEqual(seen[-1][1], "Taking screenshots (5 of 5)")
+        self.assertTrue(all(b[0] >= a[0] for a, b in zip(seen, seen[1:]) if a[0] is not None and b[0] is not None))  # never goes back
+
+
+class ScreenshotFailures(unittest.TestCase):
+    def test_a_video_that_cant_be_downloaded_keeps_the_transcript(self):
+        import app
+
+        t = tr.Transcript("Talk", "https://example.com/v", 60, "en", "captions", [tr.Segment(0, 2, "Hi.")])
+        job = "aaaabbbbcccc"
+        app._jobs[job] = {"id": job, "url": t.url, "state": "queued", "stage": "queued", "percent": None, "message": "", "createdAt": time.time(), "updatedAt": time.time(), "frames": {"state": "waiting"}}
+        req = app.JobRequest(url=t.url)
+        with mock.patch.object(tr, "transcribe_url", return_value=t), mock.patch.object(shots, "download_video", side_effect=shots.ShotsError("The video could not be downloaded: This video is private.")):
+            app._run(job, req)
+        try:
+            self.assertEqual(app._jobs[job]["state"], "done")
+            self.assertIs(app._jobs[job]["transcript"], t)
+            self.assertEqual(app._jobs[job]["frames"]["state"], "none")
+            from fastapi.testclient import TestClient
+
+            body = TestClient(app.app).get(f"/api/jobs/{job}/frames").json()
+            self.assertEqual(body, {"state": "none", "percent": None, "message": "The video could not be downloaded: This video is private.", "items": []})
+            self.assertEqual(json.loads((shots.FRAMES_DIR / job / "job.json").read_text(encoding="utf-8"))["state"], "none")
+        finally:
+            app._jobs.pop(job, None)
+
+    def test_off_and_running_states(self):
+        import app
+        from fastapi.testclient import TestClient
+
+        c = TestClient(app.app)
+        for job, frames in (("off000000001", {"state": "off", "message": "Screenshots were turned off for this video."}), ("run000000001", {"state": "running", "percent": 42.0, "message": "Finding the scene changes"})):
+            app._jobs[job] = {"id": job, "state": "done", "frames": frames}
+            try:
+                body = c.get(f"/api/jobs/{job}/frames").json()
+                self.assertEqual((body["state"], body["percent"], body["message"], body["items"]), (frames["state"], frames.get("percent"), frames["message"], []))
+            finally:
+                app._jobs.pop(job, None)
+        self.assertTrue(app.JobRequest(url="https://example.com/v").screenshots)  # on by default
+
+    def test_no_ffmpeg(self):
+        with mock.patch.object(shots, "ffmpeg_exe", return_value=None), self.assertRaises(shots.ShotsError) as ctx:
+            shots.take_screenshots(Path("missing.mp4"), [], Path(TMP) / "none")
+        self.assertIn("FFmpeg was not found", str(ctx.exception))
+
+    def test_old_folders_are_deleted(self):
+        old, new = shots.FRAMES_DIR / "01d000000001", shots.FRAMES_DIR / "0e0000000001"
+        for d in (old, new):
+            d.mkdir(parents=True, exist_ok=True)
+        stamp = time.time() - 15 * 86400
+        os.utime(old, (stamp, stamp))
+        shots.cleanup()
+        self.assertFalse(old.exists())
+        self.assertTrue(new.exists())
 
 
 if __name__ == "__main__":

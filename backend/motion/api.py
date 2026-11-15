@@ -2,12 +2,17 @@
 HTTP routes under /api/motion, and `install(app, ...)`, which wires Motion into the transcriber's app.
 
 Projects     GET/POST /projects, GET/PATCH/DELETE /projects/{id}, GET /projects/{id}/bundle
+             (POST takes sourceText for a transcript, and framesJob to bring that transcription's
+             screenshots along as layout references)
 Scenes       PUT /projects/{id}/scenes/{sceneId}   (direct edits from the page; refused if stale)
 Undo         POST /projects/{id}/undo
 Assets       GET/POST /projects/{id}/assets, GET/DELETE /projects/{id}/assets/{name}
 Chat         GET/POST /projects/{id}/chat, POST .../chat/stop, POST .../chat/new
 Live updates GET /projects/{id}/events?after=<seq>&boot=<id>   (long poll)
-Export       POST /projects/{id}/export, POST .../export/cancel, GET /projects/{id}/renders/{file}
+Export       POST /projects/{id}/export {resolution, narration, sfx, loudness}, POST .../export/cancel,
+             GET /projects/{id}/renders/{file} (the MP4s and their .srt and .vtt captions)
+Captions     GET /projects/{id}/captions.srt, GET /projects/{id}/captions.vtt
+Thumbnail    GET /projects/{id}/thumbnail.jpg (?download=1), GET/PUT /projects/{id}/thumbnail
 Brand kits   GET/POST /brand-kits, PUT/DELETE /brand-kits/{id}, GET/POST/DELETE /brand-kits/{id}/logo,
              POST /brand-kits/extract
 Health       GET /health
@@ -17,11 +22,13 @@ from __future__ import annotations
 
 import atexit
 import hashlib
+import io
 import os
 import re
 import threading
 import time
 import urllib.parse
+import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Body, FastAPI, File, Request, UploadFile
@@ -33,8 +40,8 @@ from . import voice as vc
 from . import brand as br
 from . import render as rd
 from .hub import Hub
-from .jobs import Exports, VoiceJobs, narration_track
-from .store import ASPECTS, TRANSITIONS, Store, StoreError, slugify
+from .jobs import Exports, VoiceJobs, narration_track, thumbnail_image
+from .store import ASPECTS, TRANSITIONS, Store, StoreError, fmt_clock, slugify
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -53,7 +60,9 @@ def load_env_file(path: Path) -> None:
             os.environ[key] = value
 
 
-def install(app: FastAPI, dist_dir: Path, find_ffmpeg) -> None:
+def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
+    """`references(jobId)` finds a transcription's screenshots on disk ({folder, title, url, items: [{t,
+    file, text}]} or None); the transcriber passes screenshots.load."""
     load_env_file(BACKEND_DIR / ".env")
     store = Store()
     hub = Hub(store)
@@ -164,7 +173,17 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg) -> None:
             name = "transcript-" + slugify(str(body.get("sourceTitle") or "source"))[:40] + ".txt"
             text = (f"Title: {body.get('sourceTitle')}\n" if body.get("sourceTitle") else "") + (f"Link: {body.get('sourceUrl')}\n\n" if body.get("sourceUrl") else "\n") + source
             attachments.append(store.save_asset(p["id"], name, text.encode("utf-8"))["name"])
-        return {"project": p, "attachments": attachments}
+        # The transcription's screenshots, when it has them: copied in as ref-<mm>m<ss>s.jpg assets with
+        # docs/REFERENCES.md and project.references, for Claude to look at (view_references), never to show.
+        refs = []
+        job = body.get("framesJob")
+        if isinstance(job, str) and job.strip() and references:
+            found = references(job.strip())
+            if found and found.get("items"):
+                frames = [{"t": it["t"], "path": Path(found["folder"]) / it["file"], "text": it.get("text") or ""} for it in found["items"]]
+                refs = store.add_references(p["id"], frames, found.get("title") or body.get("sourceTitle"), found.get("url") or body.get("sourceUrl"))
+                p = store.get_project(p["id"])
+        return {"project": p, "attachments": attachments, "references": len(refs)}
 
     @r.get("/projects/{pid}")
     def get_project(pid: str) -> dict:
@@ -394,12 +413,82 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg) -> None:
     def get_doc(pid: str, name: str) -> Response:
         return Response(store.read_doc(pid, name), media_type="text/markdown; charset=utf-8")
 
+    # ── captions: the written narration, timed by the voice ──
+
+    @r.get("/projects/{pid}/captions.srt")
+    def captions_srt(pid: str) -> Response:
+        p = store.get_project(pid)
+        return Response(store.captions(pid, "srt"), media_type="application/x-subrip; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{slugify(p["title"])}.srt"'})
+
+    @r.get("/projects/{pid}/captions.vtt")
+    def captions_vtt(pid: str) -> Response:
+        p = store.get_project(pid)
+        return Response(store.captions(pid, "vtt"), media_type="text/vtt; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{slugify(p["title"])}.vtt"'})
+
+    # ── the YouTube thumbnail ──
+
+    @r.get("/projects/{pid}/thumbnail.jpg")
+    def thumbnail_jpg(pid: str, download: int = 0, v: str = "") -> FileResponse:
+        # rendered on first request after each change, then served from renders/ (404 before there is one).
+        # A versioned link (the url GET /thumbnail gives, ?v=...) never changes its picture, so the browser
+        # keeps it; a bare link is checked every time.
+        f, _ = thumbnail_image(store, renderer, pid)
+        cache = "private, max-age=31536000, immutable" if v else "no-cache"
+        if download:
+            return FileResponse(f, media_type="image/jpeg", filename=f'{slugify(store.get_project(pid)["title"])}-thumbnail.jpg', headers={"Cache-Control": cache})
+        return FileResponse(f, media_type="image/jpeg", headers={"Cache-Control": cache})
+
+    @r.get("/projects/{pid}/thumbnail")
+    def thumbnail_get(pid: str) -> dict:
+        return store.thumbnail_view(pid, rd.RUNTIME_VERSION)
+
+    @r.put("/projects/{pid}/thumbnail")
+    def thumbnail_put(pid: str, body: dict = Body(...)) -> dict:
+        not_running(pid)
+        snapshot_for_edit(pid, "the thumbnail")
+        p, warnings = store.write_thumbnail(pid, body.get("html"), body.get("props") if isinstance(body.get("props"), dict) else None, body.get("baseRev"))
+        hub.project_changed(pid, p["version"])
+        return {**store.thumbnail_view(pid, rd.RUNTIME_VERSION), "warnings": warnings, "version": p["version"]}
+
+    # ── the publishing kit: everything an upload needs besides the MP4, in one zip ──
+
+    @r.get("/projects/{pid}/publish-kit.zip")
+    def publish_kit(pid: str) -> Response:
+        """The thumbnail, the captions (SRT and VTT), the chapters (for the description) and YOUTUBE.md, in one
+        zip named after the video. What doesn't exist yet (no thumbnail, no narration) is left out."""
+        p = store.get_project(pid)
+        slug = slugify(p["title"])
+        files: list[tuple[str, bytes]] = []
+        if p.get("thumbnail"):
+            f, _ = thumbnail_image(store, renderer, pid)
+            files.append((f"{slug}-thumbnail.jpg", f.read_bytes()))
+        if any((s.get("narration") or "").strip() for s in p["scenes"]):
+            files.append((f"{slug}.srt", store.captions(pid, "srt").encode("utf-8")))
+            files.append((f"{slug}.vtt", store.captions(pid, "vtt").encode("utf-8")))
+        chapters = store.chapters(pid)
+        if chapters:
+            lines = [f"{fmt_clock(c['start'])} {c['title']}" for c in chapters]
+            files.append((f"{slug}-chapters.txt", ("\n".join(lines) + "\n").encode("utf-8")))
+        for d in store.list_docs(pid):
+            if d["name"].upper() == "YOUTUBE.MD":
+                files.append((d["name"], store.read_doc(pid, d["name"]).encode("utf-8")))
+        if not files:
+            raise StoreError("Nothing to download yet: this video has no thumbnail, narration or YouTube details.", 404)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for name, data in files:
+                z.writestr(name, data)
+        return Response(buf.getvalue(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{slug}-publish-kit.zip"'})
+
     # ── export ──
 
     @r.post("/projects/{pid}/export")
     def start_export(pid: str, body: dict = Body(default={})) -> dict:
-        # narration and sfx (the paper sounds) default to on; the music bed is the project's audio setting
-        return exports.start(pid, int(body.get("resolution") or 1080), body.get("narration") is not False, body.get("sfx") is not False)
+        # narration, sfx (the paper sounds) and loudness (the mix at -14 LUFS) default to on; the music bed is
+        # the project's audio setting
+        return exports.start(
+            pid, int(body.get("resolution") or 1080), body.get("narration") is not False, body.get("sfx") is not False, body.get("loudness") is not False,
+        )
 
     @r.post("/projects/{pid}/export/cancel")
     def cancel_export(pid: str) -> dict:
@@ -408,10 +497,12 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg) -> None:
 
     @r.get("/projects/{pid}/renders/{name}")
     def get_render(pid: str, name: str) -> FileResponse:
+        # an exported MP4, or the captions written next to it
+        types = {".mp4": "video/mp4", ".srt": "application/x-subrip; charset=utf-8", ".vtt": "text/vtt; charset=utf-8"}
         f = store.renders_dir(pid) / Path(name).name
-        if f.suffix != ".mp4" or not f.exists():
+        if f.suffix not in types or ".part" in f.name or ".audio" in f.name or not f.exists():
             raise StoreError("No such file.", 404)
-        return FileResponse(f, media_type="video/mp4", filename=f.name)
+        return FileResponse(f, media_type=types[f.suffix], filename=f.name)
 
     # ── brand kits ──
 

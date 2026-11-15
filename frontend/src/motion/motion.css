@@ -567,6 +567,171 @@
   overflow-wrap: anywhere;
 }
 
+/* a finished export: the MP4, then its caption files on the same line */
+.mo-export-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.mo-export-links > .btn {
+  align-self: center;
+}
+
+.mo-export-links > .muted {
+  margin-left: 6px;
+}
+
+/* ── the Publish menu: the thumbnail, captions, chapters and the zip ── */
+
+.mo-menu.mo-publish-menu {
+  width: 400px;
+  max-width: calc(100vw - 32px);
+}
+
+/* (the export menu used to hold Publish as a second column; these stay for a narrow layout) */
+.mo-menu.mo-export-wide {
+  width: 720px;
+}
+
+.mo-export-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 14px;
+}
+
+.mo-export-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mo-export-col-publish {
+  border-left: 1px solid var(--border);
+  padding-left: 14px;
+}
+
+/* a narrow window: Publish goes under the export options and the menu scrolls */
+@media (max-width: 1120px) {
+  .mo-menu.mo-export-wide {
+    width: 360px;
+  }
+  .mo-export-cols {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 14px;
+  }
+  .mo-export-col-publish {
+    border-left: 0;
+    padding-left: 0;
+    border-top: 1px solid var(--border);
+    padding-top: 14px;
+  }
+}
+
+.mo-publish {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* "For the YouTube upload", with the same red or purple mark as the top bar's destination button */
+.mo-publish-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 0.95rem;
+}
+
+.mo-publish-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mo-publish-section + .mo-publish-section {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.mo-publish-section .label {
+  margin: 0;
+}
+
+.mo-publish-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* .btn-small aligns to the top of a column; in these rows the buttons sit on the line */
+.mo-publish-row > .btn {
+  align-self: center;
+}
+
+/* the 16:9 preview, on the library's striped poster ground while the image loads */
+.mo-thumb {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: repeating-linear-gradient(135deg, var(--bg), var(--bg) 10px, var(--primary-soft) 10px, var(--primary-soft) 20px);
+}
+
+.mo-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* a line over the box: the image didn't load, or it is still on its way */
+.mo-thumb-note {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--muted);
+  background: var(--bg);
+}
+
+/* while loading, the stripes show through */
+.mo-thumb-loading {
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  color: var(--text);
+}
+
+.mo-thumb-loading .spinner {
+  width: 14px;
+  height: 14px;
+}
+
+/* a section's label with a note at its right end (the thumbnail's size and age) */
+.mo-publish-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mo-publish-label-row > .muted {
+  min-width: 0;
+  text-align: right;
+}
+
 /* ── chat ────────────────────────────────────────────────────────────── */
 
 .mo-chat {

@@ -26,9 +26,9 @@ import anthropic
 from . import brand as br
 from . import render as rd
 from .hub import Hub
-from .jobs import Exports
+from .jobs import Exports, thumbnail_image
 from .prompts import ALL_TOOLS, SYSTEM_PROMPT, TOOL_LABELS
-from .store import CLOSING_KINDS, Store, StoreError, asset_kind, clock_seconds, coverage, fmt_clock, image_size, safe_asset_name, target_from_source
+from .store import CLOSING_KINDS, Store, StoreError, asset_kind, clock_seconds, coverage, fmt_clock, image_size, ref_clock, safe_asset_name, target_from_source
 
 # Prices in US dollars per million tokens: input, output, cache read. Cache writes cost 1.25x input.
 MODELS: dict[str, dict] = {
@@ -42,7 +42,7 @@ DEFAULT_EFFORT = os.environ.get("MOTION_EFFORT") if os.environ.get("MOTION_EFFOR
 MAX_STEPS = 250  # API calls per turn (a 30 minute video is about 80 scenes, each written, checked and fixed)
 MAX_NUDGES = 30  # times one turn sends Claude back to an unfinished build
 MAX_ACTIVE_TURNS = 2  # turns running at once across all videos
-MUTATING = {"write_storyboard", "write_script", "set_pronunciations", "write_scene", "patch_scene", "set_props", "update_timeline", "save_brand_kit", "use_brand_kit", "import_asset"}
+MUTATING = {"write_storyboard", "write_script", "set_pronunciations", "write_scene", "patch_scene", "set_props", "update_timeline", "save_brand_kit", "use_brand_kit", "import_asset", "write_thumbnail"}
 ENGINES = ("claude-code", "api")
 TIMESTAMP_RE = re.compile(r"(?<![\d:])(?:(\d{1,2}):)?(\d{1,2}):(\d{2})(?:[.,]\d{1,3})?(?![\d:])")
 TEXT_DOC_EXT = {".txt", ".md", ".csv", ".json", ".srt", ".vtt"}
@@ -660,6 +660,59 @@ class Agent:
         if hit:
             raise StoreError(f"{', '.join(hit)} {'is' if len(hit) == 1 else 'are'} part of the closing (the AlgoInsight promo or the end screen), which the user controls in the video's settings. Leave {'it' if len(hit) == 1 else 'them'} as {'it is' if len(hit) == 1 else 'they are'}.")
 
+    def _view_references(self, pid: str, a: dict) -> tuple[object, str]:
+        """view_references: the screenshots of the source between from and to (source times), each as an image
+        followed by its time, asset name and what is said then. More than `limit` (6, at most 12) in the range:
+        an even spread over it, and the text says how many there are."""
+        s = self.store
+        refs = s.get_project(pid).get("references") or []
+        if not refs:
+            return "This video has no screenshots of its source (they come with a transcript made with Screenshots on).", "No screenshots of the source"
+        try:
+            lo = clock_seconds(a["from"]) if a.get("from") else 0.0
+            hi = clock_seconds(a["to"]) if a.get("to") else float("inf")
+        except (ValueError, TypeError, AttributeError):
+            raise StoreError("INVALID_INPUT: from and to are source times like 1:40.") from None
+        limit = a.get("limit", 6)
+        if limit is None:
+            limit = 6
+        if isinstance(limit, bool) or not isinstance(limit, (int, float)):
+            raise StoreError("INVALID_INPUT: limit is a number from 1 to 12.")
+        limit = max(1, min(12, int(limit)))
+        if a.get("from") and a.get("to"):
+            where = f"between {ref_clock(lo)} and {ref_clock(hi)}"
+        elif a.get("from"):
+            where = f"from {ref_clock(lo)} on"
+        elif a.get("to"):
+            where = f"up to {ref_clock(hi)}"
+        else:
+            where = f"of the whole source, {ref_clock(refs[0]['t'])}-{ref_clock(refs[-1]['t'])}"
+        hits = [r for r in refs if lo <= int(r["t"]) <= hi]  # whole seconds, as the times are shown
+        if not hits:
+            return f"No screenshots {where}. They run from {ref_clock(refs[0]['t'])} to {ref_clock(refs[-1]['t'])}.", "No screenshots of the source there"
+        n = len(hits)
+        shown = hits if n <= limit else ([hits[n // 2]] if limit == 1 else [hits[round(i * (n - 1) / (limit - 1))] for i in range(limit)])
+        span = f"{ref_clock(hits[0]['t'])}-{ref_clock(hits[-1]['t'])}"
+        head = f"{len(shown)} of {n} screenshots {where}"
+        if n > len(shown):
+            head += " (spread evenly; narrow from and to, or raise limit up to 12, to see the rest)"
+        head += (
+            ". Each image is followed by its source time and what is said then. Look at what the source shows at each point and how "
+            "much it puts on one screen, then design your own page in the paper look: never copy their layout, words, brand, logos, "
+            "characters, numbers or images, and never show these screenshots in the video."
+        )
+        out: list[dict] = [{"type": "text", "text": head}]
+        for r in shown:
+            try:
+                data = s.asset_path(pid, r["asset"]).read_bytes()
+            except StoreError:
+                out.append({"type": "text", "text": f"[{ref_clock(r['t'])}] {r['asset']} is gone from the assets."})
+                continue
+            out.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(data).decode()}})
+            said = r.get("text") or ""
+            out.append({"type": "text", "text": f"[{ref_clock(r['t'])}] {r['asset']}: " + (f'"{said}"' if said else "(no speech)")})
+        return out, f"Looked at {len(shown)} screenshot{'s' if len(shown) != 1 else ''} of the source ({span})"
+
     def _tool(self, pid: str, name: str, a: dict) -> tuple[object, str]:
         """Runs one tool. Returns (tool_result content, the label the chat shows)."""
         s = self.store
@@ -751,6 +804,9 @@ class Agent:
             head = f"{src['name']} ({fmt_clock(src['seconds'])}): {cov['covered']} of {cov['total']} lines covered by scenes, {cov['skipped']} skipped, {len(cov['missing'])} not covered. Each line shows the scenes whose covers include it."
             return head + "\n" + "\n".join(rows), f"Read the source ({len(rows)} lines)"
 
+        if name == "view_references":
+            return self._view_references(pid, a)
+
         if name == "set_pronunciations":
             if not isinstance(a.get("entries"), list):
                 raise StoreError("INVALID_INPUT: entries must be a list of {written, spoken}.")
@@ -776,9 +832,10 @@ class Agent:
             rows = self.render.call(self.render.audit, bundle, ids, timeout=900)
             problems = [r for r in rows if _issue_count(r) or r.get("words", 0) > 12]
             checked = len({r["id"] for r in rows if r["id"] != "*"})
+            moments = sum(1 for r in rows if "gaps" not in r and "late" not in r)  # the timing rows aren't moments looked at
             if not problems:
-                return f"Audit: {checked} scenes checked at {len(rows)} moments, no problems found.", f"Audited {checked} scenes: no problems"
-            lines = [f"Audit: {checked} scenes checked at {len(rows)} moments; {len(problems)} with problems:"]
+                return f"Audit: {checked} scenes checked at {moments} moments and for their timing, no problems found.", f"Audited {checked} scenes: no problems"
+            lines = [f"Audit: {checked} scenes checked at {moments} moments and for their timing; {len(problems)} problems:"]
             for r in problems[:80]:
                 lines.append(f"- {r['id']} at {r['t']:.2f} s: " + _diag_line(r))
             return "\n".join(lines), f"Audited {checked} scenes: {len(problems)} problems"
@@ -849,9 +906,36 @@ class Agent:
                 {"type": "text", "text": _diag_text(sid, at, diag)},
             ], f"Checked scene {sid} at {_fmt_seconds(at)}"
 
+        if name == "write_thumbnail":
+            # saved like a scene, then photographed at once: Claude sees the 1280 x 720 picture and its report
+            html = self._str(a, "html")
+            props = a.get("props") if isinstance(a.get("props"), dict) else {}
+            p, warnings = s.write_thumbnail(pid, html, props)
+            self._changed(pid, p)
+            rev = (p.get("thumbnail") or {}).get("rev", 0)
+            path, diag = thumbnail_image(s, self.render, pid, fresh=True)
+            img = path.read_bytes()
+            frames = s.renders_dir(pid) / "frames"
+            frames.mkdir(exist_ok=True)
+            fname = f"thumbnail-{int(time.time() * 1000)}.jpg"
+            (frames / fname).write_bytes(img)  # the chat keeps this version's picture even after the next change
+            self.hub.add(pid, {"kind": "frame", "sceneId": "thumbnail", "at": rd.THUMBNAIL_AT, "url": f"/api/motion/projects/{pid}/frames/{fname}", "issues": _issue_count(diag or {})})
+            text = _diag_text("thumbnail", rd.THUMBNAIL_AT, diag or {}, head=f"Thumbnail saved (rev {rev}). The image is the thumbnail at YouTube's 1280 x 720.", max_words=5)
+            if warnings:
+                text += "\nFix these:\n- " + "\n- ".join(warnings)
+            return [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(img).decode()}},
+                {"type": "text", "text": text},
+            ], f"Designed the thumbnail (rev {rev})"
+
         if name == "list_assets":
-            items = s.list_assets(pid)
-            return json.dumps(items, ensure_ascii=False) if items else "No files uploaded yet.", "Listed the files"
+            # the references (screenshots of the source) are left out: view_references shows them
+            refs = s.reference_assets(s.get_project(pid))
+            items = [x for x in s.list_assets(pid) if x["name"] not in refs]
+            text = json.dumps(items, ensure_ascii=False) if items else "No files uploaded yet."
+            if refs:
+                text += f"\n(Also {len(refs)} screenshots of the source, ref-*.jpg: layout references for view_references, never to show in the video.)"
+            return text, "Listed the files"
 
         if name == "read_web_page":
             page = br.page_text(self._str(a, "url"))
@@ -919,15 +1003,48 @@ class Agent:
         raise StoreError(f"Unknown tool {name}.")
 
 
-ISSUE_KEYS = ("errors", "offStage", "outsideSafe", "inZone", "overlaps", "crowded", "smallText")
+# gaps and late come from the player's timing check (audit_video): stretches where nothing moves while the
+# voice talks, and elements that arrive after the phrase that should bring them has gone by
+ISSUE_KEYS = ("errors", "offStage", "outsideSafe", "inZone", "overlaps", "crowded", "overflow", "smallText", "gaps", "late", "handChart")
 
 
 def _issue_count(diag: dict) -> int:
     return sum(len(diag.get(k) or []) for k in ISSUE_KEYS)
 
 
+def _num_text(x) -> str:
+    """A number of seconds as the report says it: one decimal (12.4), or ? when the player gave none."""
+    try:
+        return f"{float(x):.1f}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _late_text(x: dict) -> str:
+    """One late entrance: "chip-a arrives late: cue(2) + 3.2 s lands 1.1 s into the next phrase (cue(3) at
+    14.2 s); pin it to cue(3) or shorten the offset". nextCue is the time the next phrase starts (the voice's
+    end after the last cue) and nextIndex its cue number, from the audit (render._timing_rows)."""
+    who = x.get("id") or "an element"
+    idx, when, into = x.get("nextIndex"), x.get("nextCue"), x.get("into")
+    pinned = f"cue({x.get('cue')})" + (f" + {_num_text(x.get('plus'))} s" if x.get("plus") not in (None, 0) else "")
+    if into is not None and idx is not None:
+        where = f"lands {_num_text(into)} s into the next phrase (cue({idx}) at {_num_text(when)} s)"
+        fix = f"pin it to cue({idx}) or shorten the offset"
+    elif into is not None:
+        where = f"lands {_num_text(into)} s after the voice ends (at {_num_text(when)} s)"
+        fix = "bring it in while the voice still talks, or shorten the offset"
+    else:
+        where = f"lands at {_num_text(x.get('at'))} s, after the next phrase began"
+        fix = "pin it to the cue whose words bring it, or shorten the offset"
+    return f"{who} arrives late: {pinned} {where}; {fix}"
+
+
 def _diag_line(d: dict) -> str:
     bits = []
+    for gap in d.get("gaps") or []:
+        bits.append(f"nothing moves from {_num_text(gap[0])} to {_num_text(gap[1])} s while the voice talks: add a change, a camera move or a flow there")
+    for x in d.get("late") or []:
+        bits.append(_late_text(x))
     if d.get("errors"):
         bits.append("ERRORS " + " | ".join(str(e) for e in d["errors"][:3]))
     if d.get("offStage"):
@@ -940,6 +1057,13 @@ def _diag_line(d: dict) -> str:
         bits.append("overlapping: " + ", ".join(" + ".join(p) for p in d["overlaps"][:4]))
     if d.get("crowded"):
         bits.append("too close (under 18 px apart, they look like they touch): " + ", ".join(" + ".join(p) for p in d["crowded"][:4]))
+    if d.get("handChart"):
+        bits.append("hand-drawn chart: use fx.chart (" + ", ".join(d["handChart"][:4]) + ")")
+    if d.get("overflow"):
+        bits.append(
+            "words run into the box's padding or edge (size the box to its words, or shorten them): "
+            + ", ".join(f'{x["id"]} by {x["px"]} px' for x in d["overflow"][:4])
+        )
     if d.get("smallText"):
         bits.append("too small: " + ", ".join(f'{x["id"]} {x["px"]}px' for x in d["smallText"][:4]))
     if d.get("words", 0) > 12:
@@ -947,8 +1071,10 @@ def _diag_line(d: dict) -> str:
     return "; ".join(bits)
 
 
-def _diag_text(sid: str, at: float, d: dict) -> str:
-    lines = [f"Scene {sid} at {at:.2f} s. The image is the frame, scaled down."]
+def _diag_text(sid: str, at: float, d: dict, head: str | None = None, max_words: int = 12) -> str:
+    """The layout report that goes with a frame (render_preview_frame) or the thumbnail (write_thumbnail,
+    which allows 5 words instead of 12)."""
+    lines = [head or f"Scene {sid} at {at:.2f} s. The image is the frame, scaled down."]
     if d.get("errors"):
         lines.append("ERRORS: " + " | ".join(str(e) for e in d["errors"][:5]))
     if d.get("offStage"):
@@ -961,7 +1087,7 @@ def _diag_text(sid: str, at: float, d: dict) -> str:
         lines.append("Overlapping text: " + ", ".join(" + ".join(p) for p in d["overlaps"][:8]))
     if d.get("smallText"):
         lines.append("Text too small: " + ", ".join(f'{x["id"]} ({x["px"]}px)' for x in d["smallText"][:8]))
-    lines.append(f"Words on screen: {d.get('words', 0)}" + (" (over 12)" if d.get("words", 0) > 12 else ""))
+    lines.append(f"Words on screen: {d.get('words', 0)}" + (f" (over {max_words})" if d.get("words", 0) > max_words else ""))
     visible = d.get("visible") or []
     if visible:
         lines.append("Visible elements: " + "; ".join(f'{v["id"]}' + (f' "{v["text"]}"' if v.get("text") else "") for v in visible[:25]))

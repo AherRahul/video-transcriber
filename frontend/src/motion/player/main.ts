@@ -23,6 +23,8 @@ declare global {
       seekScene: (id: string, local: number) => void;
       diagnose: Runtime["diagnose"];
       sfx: Runtime["sfx"];
+      /** the audit's timing report for one scene: {gaps, late} (see Runtime.timing) */
+      timing: Runtime["timing"];
     };
   }
 }
@@ -34,6 +36,7 @@ window.MotionPlayer = {
   seekScene: (id, local) => runtime.seekScene(id, local),
   diagnose: (id, local) => runtime.diagnose(id, local),
   sfx: () => runtime.sfx(),
+  timing: (id) => runtime.timing(id),
 };
 
 if (mode === "preview") startPreview();

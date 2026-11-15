@@ -6,11 +6,14 @@ motion-data/
   projects/<projectId>/
     project.json          title, aspect, brand kit, settings, version, the ordered scene list
     scenes/<sceneId>.html one self-contained scene (markup + <style> + <script>)
+    thumbnail.html        the YouTube thumbnail: one still in the same file format as a scene (its rev and
+                          props are project.json's `thumbnail`)
     assets/<name>         uploads (images, audio, documents) referenced as asset://<name>
     chat.json             the conversation with Claude (API messages, a pending style question, totals)
     log.json              what the chat panel shows
     history/<n>/          snapshots taken before each change, for Undo
-    renders/              exported MP4s, the per-scene cache and library posters
+    renders/              exported MP4s with their captions (.srt, .vtt), the per-scene cache, library
+                          posters and the rendered thumbnail (thumbnail-<hash>.jpg)
     voice/<hash>.mp3|json narration clips (content-addressed) with the time of every character
     docs/<name>.md        documents Claude writes for the user (facts, the YouTube details, notes)
     source.json           the timed reference transcript the video is built from: its lines are the points
@@ -21,7 +24,7 @@ the page is refused (409) when the scene changed underneath it.
 
 A narrated scene's length comes from its narration: a short lead-in (the page change), the speech, a short
 tail and any hold. Before the voice exists the speech is estimated; after Generate voice it is the clip's
-real length, and every <cue/> moves to its spoken word.
+real length, and every <cue/> moves to its spoken word. The captions follow the same clock.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
+from html import escape as html_escape
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -75,6 +79,8 @@ TAIL_SECONDS = 0.6  # a breath after the last word
 MAX_SCENE_BYTES = 200_000
 MAX_ASSET_BYTES = 60 * 1024 * 1024
 MAX_SNAPSHOTS = 40
+THUMBNAIL_FILE = "thumbnail.html"
+THUMBNAIL_WORDS = 5  # a YouTube thumbnail reads at a glance: three to five very large words
 # A video made from a timed source runs at least 10 and at most 30 minutes (the founder's rule for the daily
 # films), and lands between 90 percent and 150 percent of its target: explaining simply takes a little longer.
 SOURCE_MIN_SECONDS = 10 * 60.0
@@ -300,6 +306,44 @@ def copied_phrases(narration: str, grams: set[tuple], n: int = COPY_RUN_WORDS) -
     return phrases
 
 
+# ── references: screenshots of the source, for looking at (never for showing) ──
+
+MAX_REFERENCES = 120
+REF_ASSET_RE = re.compile(r"\bref-\d{2,}m\d{2}s(?:-\d+)?\.jpg\b")
+
+
+def ref_clock(seconds: float) -> str:
+    """A reference's time, rounded down like its asset name: 75.6 -> 1:15 (ref-01m15s.jpg)."""
+    s = max(0, int(seconds))
+    return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
+
+
+def ref_asset_name(seconds: float) -> str:
+    """75.6 -> ref-01m15s.jpg."""
+    s = max(0, int(seconds))
+    return f"ref-{s // 60:02d}m{s % 60:02d}s.jpg"
+
+
+def references_markdown(refs: list[dict], title: str | None = None, url: str | None = None) -> str:
+    """docs/REFERENCES.md: what the screenshots are for, then a table of time, asset and what is said."""
+    lines = ["# References: screenshots of the source", ""]
+    if title or url:
+        lines += [f"Source: {title or 'the video'}" + (f" ({url})" if url else ""), ""]
+    lines += [
+        f"{len(refs)} screenshots of the source video, each with what is said around it. They are for looking at, "
+        "not for showing: what the source puts on screen at each point and how much fits on one screen. Every page "
+        "is designed in our own paper look, and never copies their layout, words, brand, logos, characters, numbers "
+        "or images. Claude sees them with view_references.",
+        "",
+        "| Time | Asset | What is said |",
+        "|------|-------|--------------|",
+    ]
+    for r in refs:
+        text = (r.get("text") or "").replace("|", "\\|") or "(no speech)"
+        lines.append(f"| {ref_clock(r['t'])} | {r['asset']} | {text} |")
+    return "\n".join(lines) + "\n"
+
+
 def promo_template() -> dict:
     """The AlgoInsight promo (seed/promo/promo.json and its scene files)."""
     return json.loads((PROMO_DIR / "promo.json").read_text(encoding="utf-8"))
@@ -486,11 +530,37 @@ def check_scene(source: str, props: dict) -> list[str]:
     hexes = sorted(set(re.findall(r"#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b", markup)))
     if hexes:
         warnings.append("Hard-coded colours " + ", ".join(hexes[:6]) + ": use the brand CSS variables (var(--accent) ...) instead.")
-    prop_words = sum(len(str(v).split()) for v in props.values() if isinstance(v, str) and not str(v).startswith("asset://"))
+    # code shown in a p-code panel is read line by line with the voice, not as words on the page, so its
+    # props don't count toward the word budget (the player's layout report leaves them out too)
+    code_keys = {
+        k
+        for block in re.findall(r"<pre\b[^>]*\bp-code\b[^>]*>([\s\S]*?)</pre>", source, re.IGNORECASE)
+        for k in HOLE_RE.findall(block)
+    }
+    prop_words = sum(
+        len(str(v).split()) for k, v in props.items() if isinstance(v, str) and k not in code_keys and not str(v).startswith("asset://")
+    )
     if scan.words + prop_words > 40:
         warnings.append(f"About {scan.words + prop_words} words of text in this scene: keep each moment to 12 words or fewer.")
     if "<script" not in source:
         warnings.append("No <script>: nothing animates in this scene.")
+    return warnings
+
+
+def check_thumbnail(source: str, props: dict) -> list[str]:
+    """The scene checks, as they apply to a still: a script is optional (anything it animates must be in
+    place by the frame the thumbnail is taken at), and the word limit is the thumbnail's own (3 to 5)."""
+    warnings = [w for w in check_scene(source, props) if not w.startswith(("No <script>", "About "))]
+    # the words a viewer reads: the markup's text with every {{hole}} filled from the props
+    filled = HOLE_RE.sub(lambda m: html_escape(str(props.get(m.group(1), "x"))), source)
+    scan = _SceneScan()
+    try:
+        scan.feed(filled)
+        scan.close()
+    except Exception:  # noqa: BLE001 - check_scene has already reported a markup problem
+        pass
+    if scan.words > THUMBNAIL_WORDS:
+        warnings.append(f"About {scan.words} words on the thumbnail: keep it to 3 to 5 very large words.")
     return warnings
 
 
@@ -1147,6 +1217,11 @@ class Store:
         used = [int(n) for n in re.findall(r"\bcue\(\s*(\d+)", source)]
         if used and max(used) > cues:
             warnings.append(f"The script uses cue({max(used)}) but the narration has {cues} <cue/> mark{'s' if cues != 1 else ''}.")
+        # a screenshot of the source is for looking at only: it never appears in the video
+        refs = self.reference_assets(p)
+        shown = sorted({n for n in REF_ASSET_RE.findall(source + " " + json.dumps(s.get("props", {}))) if n in refs})
+        if shown:
+            warnings.append(f"{', '.join(shown)} {'is a screenshot' if len(shown) == 1 else 'are screenshots'} of the source: a layout reference to look at, never to show. Remove it and draw your own page.")
         return warnings
 
     def write_script(self, pid: str, entries: list[dict], source_skips=None) -> tuple[dict, list[str]]:
@@ -1307,6 +1382,32 @@ class Store:
     def get_source(self, pid: str) -> dict | None:
         return read_json(self._dir(pid) / "source.json")
 
+    def add_references(self, pid: str, frames: list[dict], title: str | None = None, url: str | None = None) -> list[dict]:
+        """Screenshots of the source ({t, path, text}, from a transcription) become this video's references:
+        each JPEG is copied into the assets as ref-<mm>m<ss>s.jpg, docs/REFERENCES.md lists them, and
+        project.references = [{t, asset, text}] in time order. Replaces earlier references. They are layout
+        references for Claude (view_references), never assets to show in the video."""
+        with self.lock(pid):
+            p = self.get_project(pid)
+            refs = []
+            for f in sorted(frames, key=lambda x: float(x.get("t") or 0))[:MAX_REFERENCES]:
+                path = Path(f.get("path") or "")
+                if path.suffix.lower() not in (".jpg", ".jpeg") or not path.is_file():
+                    continue
+                t = max(0.0, float(f.get("t") or 0))
+                item = self.save_asset(pid, ref_asset_name(t), path.read_bytes())
+                refs.append({"t": round(t, 2), "asset": item["name"], "text": re.sub(r"\s+", " ", str(f.get("text") or "")).strip()[:400]})
+            if not refs:
+                return []
+            p["references"] = refs
+            self.write_doc(pid, "REFERENCES.md", references_markdown(refs, title, url))
+            self._save(pid, p)
+            return refs
+
+    def reference_assets(self, p: dict) -> set[str]:
+        """The asset names that are references (screenshots of the source)."""
+        return {r["asset"] for r in p.get("references") or [] if isinstance(r, dict) and r.get("asset")}
+
     def plan_review(self, pid: str, p: dict | None = None) -> dict:
         """Where the script stands against its target and source: the length, which source lines no scene
         covers, and narration that repeats the source word for word. Claude may write scene code only when
@@ -1407,7 +1508,7 @@ class Store:
     # ── undo snapshots ──
 
     def snapshot(self, pid: str, label: str) -> None:
-        """Copies project.json and the scene files, so Undo can put them back."""
+        """Copies project.json, the scene files and the thumbnail, so Undo can put them back."""
         with self.lock(pid):
             d = self._dir(pid)
             hist = d / "history"
@@ -1417,6 +1518,8 @@ class Store:
             target = hist / str(n)
             shutil.copytree(d / "scenes", target / "scenes")
             shutil.copyfile(d / "project.json", target / "project.json")
+            if (d / THUMBNAIL_FILE).exists():
+                shutil.copyfile(d / THUMBNAIL_FILE, target / THUMBNAIL_FILE)
             write_json(target / "meta.json", {"label": label, "at": now()})
             for old in existing[: max(0, len(existing) + 1 - MAX_SNAPSHOTS)]:
                 shutil.rmtree(hist / str(old), ignore_errors=True)
@@ -1443,11 +1546,20 @@ class Store:
             restored = read_json(snap / "project.json")
             shutil.rmtree(d / "scenes")
             shutil.copytree(snap / "scenes", d / "scenes")
+            # the thumbnail as it was then (a snapshot without one is from before it existed)
+            if (snap / THUMBNAIL_FILE).exists():
+                shutil.copyfile(snap / THUMBNAIL_FILE, d / THUMBNAIL_FILE)
+            else:
+                (d / THUMBNAIL_FILE).unlink(missing_ok=True)
             shutil.rmtree(snap)
             # versions only go up, so the page and any running export notice the change
             restored["version"] = current["version"]
             for s in restored["scenes"]:
                 s["rev"] = int(s.get("rev", 0)) + 1000
+            if restored.get("thumbnail"):
+                restored["thumbnail"]["rev"] = int(restored["thumbnail"].get("rev", 0)) + 1000
+            if not (d / THUMBNAIL_FILE).exists():
+                restored["thumbnail"] = None
             return self._save(pid, restored)
 
     # ── assets ──
@@ -1523,6 +1635,102 @@ class Store:
         d = self._dir(pid) / "renders"
         d.mkdir(exist_ok=True)
         return d
+
+    # ── the YouTube thumbnail ──
+
+    def write_thumbnail(self, pid: str, html: str, props: dict | None = None, base_rev: int | None = None) -> tuple[dict, list[str]]:
+        """Saves the thumbnail: one still in the scene file format (style, markup, script), its props in
+        project.json's `thumbnail` ({rev, updatedAt, props}). Returns (project, warnings). The caller takes
+        the undo snapshot first (Claude's turn does; the page's edit does). base_rev refuses a direct edit
+        made over a newer version (409), like a scene's."""
+        with self.lock(pid):
+            p = self.get_project(pid)
+            if not isinstance(html, str) or not html.strip():
+                raise StoreError("html must be the thumbnail's full source")
+            if len(html.encode("utf-8")) > MAX_SCENE_BYTES:
+                raise StoreError(f"The thumbnail is larger than {MAX_SCENE_BYTES // 1000} KB; simplify it.")
+            old = p.get("thumbnail") or {}
+            if base_rev is not None and base_rev != old.get("rev", 0):
+                raise StoreError("The thumbnail changed in the meantime (Claude or Undo edited it). Your view is now up to date; make the change again.", 409)
+            clean = _clean_props(props if isinstance(props, dict) else old.get("props") or {})
+            write_text(self._dir(pid) / THUMBNAIL_FILE, html)
+            p["thumbnail"] = {"rev": int(old.get("rev", 0)) + 1, "updatedAt": now(), "props": clean}
+            return self._save(pid, p), check_thumbnail(html, clean)
+
+    def thumbnail_source(self, pid: str) -> str | None:
+        f = self._dir(pid) / THUMBNAIL_FILE
+        return f.read_text(encoding="utf-8") if f.exists() else None
+
+    def thumbnail_key(self, pid: str, runtime: str = "") -> str | None:
+        """A cheap stand-in for the rendered thumbnail's content hash, from project.json and kit.json alone (no
+        scene files, no voice clips): the thumbnail's rev and save time (every write and undo changes them),
+        the brand kit and its last change, the closing settings the brand shows, the aspect and the player's
+        version. None before there is a thumbnail. The picture is cached under this key, so serving an
+        unchanged thumbnail never rebuilds the bundle."""
+        p = self.get_project(pid)
+        th = p.get("thumbnail")
+        if not th or not (self._dir(pid) / THUMBNAIL_FILE).exists():
+            return None
+        kit = self.get_kit(p.get("brandKitId")) or {}
+        raw = [runtime, th.get("rev"), th.get("updatedAt"), p.get("brandKitId"), kit.get("updatedAt"), kit.get("seedVersion"), p.get("aspect"), closing_of(p)]
+        return hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+    def thumbnail_view(self, pid: str, runtime: str = "") -> dict:
+        """What the page's thumbnail editor shows: {html, props, rev, url}; html and url are None before there
+        is one. The url's v changes whenever the picture can (the thumbnail or the brand), so the page may
+        cache it for good."""
+        p = self.get_project(pid)
+        th = p.get("thumbnail") or {}
+        html = self.thumbnail_source(pid) if th else None
+        key = self.thumbnail_key(pid, runtime) if html is not None else None
+        return {
+            "html": html,
+            "props": th.get("props") or {},
+            "rev": th.get("rev", 0),
+            "url": f"/api/motion/projects/{pid}/thumbnail.jpg?v={th.get('rev', 0)}-{key[:8]}" if key else None,
+        }
+
+    def thumbnail_bundle(self, pid: str) -> dict:
+        """The project's bundle with its scenes replaced by the thumbnail alone: a 3 second "thumbnail" scene
+        (a still with no frame chrome, label or page change) that the renderer photographs at 2.95 s. The
+        stage is 16:9 whatever the video's aspect (1600 x 900 in the paper look, 1920 x 1080 otherwise),
+        since YouTube shows the thumbnail at 1280 x 720."""
+        th = self.get_project(pid).get("thumbnail")
+        source = self.thumbnail_source(pid) if th else None
+        if source is None:
+            raise StoreError("This video has no thumbnail yet.", 404)
+        b = self.bundle(pid)
+        if b["theme"] != "paper":
+            b["aspect"], b["width"], b["height"] = "16:9", *ASPECTS["16:9"]
+        b["scenes"] = [
+            {
+                "id": "thumbnail",
+                "kind": "thumbnail",
+                "name": "Thumbnail",
+                "idea": "The YouTube thumbnail",
+                "start": 0.0,
+                "duration": 3.0,
+                "transition": "cut",
+                "label": "",
+                "part": "",
+                "narration": "",
+                "hold": 0,
+                "lead": 0.3,
+                "speech": 0.0,
+                "cues": [0.3],
+                "voiced": False,
+                "stale": False,
+                "props": th.get("props") or {},
+                "levers": [],
+                "rev": th.get("rev", 0),
+                "status": "written",
+                "source": source,
+            }
+        ]
+        b["duration"] = 3.0
+        b["narration"] = None  # a still: no voice, music or sounds
+        b["audio"] = None
+        return b
 
     # ── what the player and Claude see ──
 
@@ -1607,6 +1815,37 @@ class Store:
         h = hashlib.sha256(json.dumps([keys, round(start, 3)]).encode()).hexdigest()[:16]
         return {"hash": h, "clips": clips, "total": round(start, 3)}
 
+    def caption_cues(self, pid: str, p: dict | None = None) -> list[dict]:
+        """The video's captions as cues [{start, end, text}] in seconds: the written narration (no cue marks,
+        the pronunciation table not applied, so "LLM" stays "LLM"), timed by the voice. A voiced scene's words
+        sit where its clip says them, placed like the narration track (the scene's start plus its lead plus
+        the character's time); a narrated scene without its voice yet uses the estimate (2.9 words a second)."""
+        p = p or self.get_project(pid)
+        self._derive(pid, p)
+        table = p.get("pronunciations") or []
+        vdir = self._dir(pid) / "voice"
+        cues: list[dict] = []
+        start = 0.0
+        for s in p["scenes"]:
+            t = self.timing(pid, p, s)
+            words = vc.caption_text(s.get("narration") or "").split() if t["narrated"] else []
+            if words:
+                clip = vc.load_clip(vdir, t["hash"]) if t["voiced"] else None
+                base = start + t["lead"]
+                char_times = (clip.get("charTimes") or []) if clip else None  # None: no voice yet, use the estimate
+                timed = vc.timed_words(words, table, t["spoken"], t["speech"], char_times)
+                # one passage per scene: a caption never runs across a page change
+                cues += vc.caption_cues([(w, base + a, base + b) for w, a, b in timed])
+            start += s["duration"]
+        return vc.settle_cues(cues, start)
+
+    def captions(self, pid: str, fmt: str) -> str:
+        """The captions as SRT or WebVTT text (fmt "srt" or "vtt")."""
+        if fmt not in ("srt", "vtt"):
+            raise StoreError("Captions come as srt or vtt.")
+        cues = self.caption_cues(pid)
+        return vc.to_srt(cues) if fmt == "srt" else vc.to_vtt(cues)
+
     def voice_status(self, pid: str) -> dict:
         p = self.get_project(pid)
         rows, chars_needed = [], 0
@@ -1660,6 +1899,9 @@ class Store:
             lines.append(line)
             if p.get("sourceSkips"):
                 lines.append("source skips: " + "; ".join(f'{k["range"]} ({k["reason"]})' for k in p["sourceSkips"]))
+        refs = p.get("references") or []
+        if refs:
+            lines.append(f'references: {len(refs)} screenshots of the source, {ref_clock(refs[0]["t"])}-{ref_clock(refs[-1]["t"])} (view_references; to look at, never to show)')
         if review["problems"]:
             lines.append("before any scene code (write_scene is refused until these are fixed):")
             lines += [f"  - {x}" for x in review["problems"]]
@@ -1675,6 +1917,12 @@ class Store:
         docs = self.list_docs(pid)
         if docs:
             lines.append("documents: " + ", ".join(d["name"] for d in docs))
+        th = p.get("thumbnail")
+        if th and (self._dir(pid) / THUMBNAIL_FILE).exists():
+            tprops = json.dumps(th.get("props") or {}, ensure_ascii=False, sort_keys=True)
+            lines.append(f'thumbnail: written (rev {th.get("rev", 0)}), props {tprops[:300] + "...}" if len(tprops) > 300 else tprops}; write_thumbnail replaces it')
+        else:
+            lines.append("thumbnail: none yet (design it with write_thumbnail at the hand-off)")
         if kit:
             pal = ", ".join(f"{k} {v}" for k, v in kit["palette"].items())
             ext = ", ".join(f"{k} {v}" for k, v in (kit.get("extras") or {}).items())
@@ -1690,7 +1938,8 @@ class Store:
                 lines.append(f'  end card: headline "{ec.get("headline", "")}", cta "{ec.get("cta", "")}", url "{ec.get("url", "")}"')
         else:
             lines.append("brand kit: none (use the defaults)")
-        assets = self.list_assets(pid)
+        refs_named = self.reference_assets(p)  # the references have their own line above
+        assets = [a for a in self.list_assets(pid) if a["name"] not in refs_named]
         if assets:
             lines.append("assets: " + ", ".join(a["name"] + (f' ({a["width"]}x{a["height"]})' if a.get("width") else f' ({a["kind"]})') for a in assets))
         if p.get("audio"):

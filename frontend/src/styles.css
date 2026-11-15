@@ -403,6 +403,188 @@ mark {
   border-radius: 2px;
 }
 
+/* ── Screenshots: the video at each new scene, with what is said (layout references for Motion) ── */
+
+.shots {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.shots-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.shots-title {
+  min-width: 0;
+}
+
+.shots-title h2 {
+  margin: 0 0 4px;
+  font-size: 1.15rem;
+}
+
+.shots-title p,
+.shots-note {
+  margin: 0;
+}
+
+.shots-step {
+  margin: 8px 0 0;
+}
+
+.shots-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(190px, 100%), 1fr));
+  gap: 12px;
+}
+
+/* grid and flex children shrink below their text only with min-width: 0, so long lines wrap */
+.shots-grid > li {
+  min-width: 0;
+}
+
+/* a tile: the frame, its time and the line being said; the whole tile opens it large */
+.shot {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: zoom-in;
+}
+
+.shot:hover {
+  border-color: var(--primary);
+}
+
+.shot:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.shot img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: contain; /* a portrait video keeps its shape */
+  background: var(--border);
+}
+
+.shot-caption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px 10px;
+}
+
+.shot-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.shot-text {
+  min-width: 0;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+.shots-more {
+  align-self: center;
+}
+
+/* one screenshot large: capped to the window, the picture shrinks to fit, the buttons stay in view */
+.lightbox {
+  width: min(1100px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  overflow: hidden;
+}
+
+.lightbox::backdrop {
+  background: rgb(0 0 0 / 0.7);
+}
+
+.lightbox-body {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 34px);
+  max-height: calc(100dvh - 34px);
+}
+
+.lightbox-body img {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  object-fit: contain;
+  background: var(--bg);
+}
+
+.lightbox-caption {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 12px 16px 0;
+}
+
+.lightbox-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+}
+
+.lightbox-text {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.lightbox-actions {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px 16px;
+}
+
+@media (max-width: 640px) {
+  .shots-head {
+    flex-direction: column;
+  }
+  .lightbox-actions .btn {
+    flex: 1;
+  }
+}
+
 /* ── The video prompt ───────────────────────────────────────────── */
 
 textarea {
