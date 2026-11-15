@@ -113,6 +113,8 @@ export type Project = {
   /** where the film goes: a Udemy film shows no website, URL, price or platform of ours */
   destination?: Destination;
   closing?: Closing;
+  /** the YouTube thumbnail Claude designed (write_thumbnail); null or missing when there is none */
+  thumbnail?: Thumbnail | null;
   version: number;
   createdAt: number;
   updatedAt: number;
@@ -125,6 +127,17 @@ export type Destination = "youtube" | "udemy";
 export type Closing = { logo: boolean; url: boolean; promo: boolean; endscreen: boolean };
 
 export const DEFAULT_CLOSING: Closing = { logo: true, url: true, promo: false, endscreen: true };
+
+/** The saved thumbnail: rev goes up on every new design, so the image URL changes with it. updatedAt
+ * is in seconds, like the project's own times. */
+export type Thumbnail = { rev: number; updatedAt: number; props?: Record<string, unknown> };
+
+/** What the thumbnail is made from (GET /thumbnail, and PUT's reply): one still in the scene file format
+ * that the server draws at 1280x720, and the values it reads. html is null before there is one. */
+export type ThumbnailSource = { html: string | null; props: Record<string, unknown>; rev: number; url?: string | null };
+
+/** The two caption files YouTube and Udemy take. */
+export type CaptionFormat = "srt" | "vtt";
 
 /** Scenes Claude writes (not the promo or the end screen, which the app adds). */
 export const isBuildable = (s: { kind: SceneKind }) => s.kind !== "endscreen" && s.kind !== "promo";
@@ -148,7 +161,20 @@ export type ExportJob = {
   message: string;
   resolution: number;
   version: number;
-  result?: { file: string; url: string; bytes: number; width: number; height: number; seconds: number; renderedScenes: number; cachedScenes: number; took: number };
+  result?: {
+    file: string;
+    url: string;
+    bytes: number;
+    width: number;
+    height: number;
+    seconds: number;
+    renderedScenes: number;
+    cachedScenes: number;
+    took: number;
+    /** the captions written next to the MP4 (null for a video without narration; exports made before
+     * captions existed have none) */
+    captions?: Partial<Record<CaptionFormat, string>> | null;
+  };
 };
 
 export type RenderFile = { file: string; bytes: number; at: number; url: string };

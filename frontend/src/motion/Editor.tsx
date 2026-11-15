@@ -1,18 +1,20 @@
 // One video: chat on the left, the live preview, scene strip and properties on the right, and a top
 // bar with the title, aspect, brand kit, the video's settings (YouTube or Udemy, logo, web address,
-// promo, end screen, target length), Claude settings, Script, Voice, Undo and Export.
+// promo, end screen, target length), Claude settings, Script, Voice, Undo and Export (the MP4, and
+// beside it what the upload needs: the captions and the thumbnail).
 //
 // The page keeps a copy of the chat log and the project, and long-polls /events for every change
 // (streamed text, tool steps, a new project version, export progress), so the preview updates as
 // Claude writes each scene.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { ago, articleFor, bytesLabel, clock, motionApi, takeDraft } from "./api";
 import BrandKitEditor from "./BrandKitEditor";
 import Chat, { type Command, type SendInput } from "./Chat";
 import Preview from "./Preview";
 import PropsPanel from "./PropsPanel";
+import PublishPanel, { THUMBNAIL_TEXT } from "./PublishPanel";
 import ScriptModal from "./ScriptModal";
 import { isBuildable, type Aspect, type Asset, type BrandKit, type CommentTarget, type ExportJob, type HubOp, type LogEntry, type MotionHealth, type ProjectView, type VoiceJob } from "./types";
 import VideoSettings, { closingSummary, destinationOf } from "./VideoSettings";
@@ -34,7 +36,7 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [kitEditor, setKitEditor] = useState<{ kit: BrandKit | null; copyFrom?: BrandKit | null } | null>(null);
-  const [menu, setMenu] = useState<"export" | "settings" | "voice" | "video" | null>(null);
+  const [menu, setMenu] = useState<"export" | "publish" | "settings" | "voice" | "video" | null>(null);
   const [title, setTitle] = useState("");
   const [loaded, setLoaded] = useState(false);
   const draft = useMemo(() => takeDraft(projectId), [projectId]);
@@ -156,6 +158,24 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
     };
   }, [menu]);
 
+  // an open menu stays inside the window: on a narrow window the top bar wraps, and a menu that opens
+  // towards the left from a button now near the left edge (Export) would run off it
+  useLayoutEffect(() => {
+    if (!menu) return;
+    const fit = () => {
+      const el = document.querySelector<HTMLElement>(".mo-top .mo-menu");
+      if (!el) return;
+      el.style.transform = "";
+      const r = el.getBoundingClientRect();
+      const room = window.innerWidth - 12;
+      const shift = r.left < 12 ? 12 - r.left : r.right > room ? room - r.right : 0;
+      if (shift) el.style.transform = `translateX(${Math.round(shift)}px)`;
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [menu]);
+
   const bundle = view?.bundle;
   // scenes Claude still has to write (the promo and the end screen come with the app), for Continue building
   const buildable = bundle ? bundle.scenes.filter(isBuildable) : [];
@@ -259,9 +279,12 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
           value={view.project.brandKitId ?? ""}
           disabled={running}
           aria-label="Brand kit"
+          title="The brand kit (pick Edit this kit… to change it; every video that uses it changes)"
           onChange={(e) => {
             if (e.target.value === "__new") setKitEditor({ kit: null });
-            else void patch({ brandKitId: e.target.value || null });
+            else if (e.target.value === "__edit") {
+              if (kit) setKitEditor({ kit });
+            } else void patch({ brandKitId: e.target.value || null });
           }}
         >
           {kits.map((k) => (
@@ -269,13 +292,10 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
               {k.name}
             </option>
           ))}
+          {/* editing lives in the list (it was a button) so the top bar has room for Publish */}
+          {kit ? <option value="__edit">Edit this kit…</option> : null}
           <option value="__new">+ New brand kit…</option>
         </select>
-        {kit ? (
-          <button type="button" className="btn btn-small" onClick={() => setKitEditor({ kit })} title="Edit this brand kit (every video that uses it changes)">
-            Edit kit
-          </button>
-        ) : null}
         <div className="mo-menu-wrap">
           <button
             type="button"
@@ -366,8 +386,37 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
         >
           Undo
         </button>
+        {/* Publish: its own menu with everything the upload needs (the thumbnail, the captions, the
+            chapters and YOUTUBE.md, one by one or in one zip, and the latest MP4) */}
         <div className="mo-menu-wrap">
-          <button type="button" className="btn btn-primary btn-small" onClick={() => setMenu(menu === "export" ? null : "export")}>
+          <button
+            type="button"
+            className={`btn btn-small ${menu === "publish" ? "btn-on" : ""}`}
+            onClick={() => setMenu(menu === "publish" ? null : "publish")}
+            title={`The thumbnail, captions and details for the ${destination === "udemy" ? "Udemy" : "YouTube"} upload`}
+          >
+            Publish
+          </button>
+          {menu === "publish" ? (
+            <div className="mo-menu mo-publish-menu">
+              <PublishPanel
+                projectId={projectId}
+                view={view}
+                running={running}
+                onAskThumbnail={() => send({ text: THUMBNAIL_TEXT, attachments: [] })}
+                onRefresh={() => motionApi.getProject(projectId).then(applyView, (err) => setError(err.message))}
+                onOpen={(m) => setMenu(m)}
+              />
+            </div>
+          ) : null}
+        </div>
+        <div className="mo-menu-wrap">
+          <button
+            type="button"
+            className="btn btn-primary btn-small"
+            onClick={() => setMenu(menu === "export" ? null : "export")}
+            title="Make the MP4 (1080p, 4K or 720p) with the narration, sounds and music"
+          >
             {exporting ? `Exporting ${Math.round(job?.percent ?? 0)}%` : "Export"}
           </button>
           {menu === "export" ? (
@@ -471,7 +520,9 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
 /**
  * The export menu. The sound is spelled out because "Soundtrack" read as "pick the voice here": the
  * narration (the generated voice) and the paper sounds are mixed in on their own, and the music bed is
- * a separate, optional file the user uploads (Motion has no built-in music).
+ * a separate, optional file the user uploads (Motion has no built-in music). Even loudness (on by
+ * default) brings the whole mix to -14 LUFS, the level YouTube plays at, so a video isn't turned down
+ * or sounds quiet next to others. A finished export links its caption files next to the MP4.
  */
 function ExportPanel({
   job,
@@ -490,7 +541,7 @@ function ExportPanel({
   audioAssets: Asset[];
   exporting: boolean;
   voiceName: string | null;
-  onStart: (res: number, opts: { narration: boolean; sfx: boolean }) => void;
+  onStart: (res: number, opts: { narration: boolean; sfx: boolean; loudness: boolean }) => void;
   onCancel: () => void;
   onAudio: (name: string) => void;
   onUploadMusic: (file: File) => Promise<void>;
@@ -499,6 +550,7 @@ function ExportPanel({
   const [res, setRes] = useState(1080);
   const [withVoice, setWithVoice] = useState(true);
   const [withSfx, setWithSfx] = useState(true);
+  const [evenLoudness, setEvenLoudness] = useState(true);
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const b = view.bundle;
@@ -568,6 +620,13 @@ function ExportPanel({
                 </span>
               </label>
             ) : null}
+            <label className="mo-check-row">
+              <input type="checkbox" checked={evenLoudness} onChange={(e) => setEvenLoudness(e.target.checked)} />
+              <span>
+                <span className="mo-check-title">Even loudness</span>
+                <span className="muted small">-14 LUFS, YouTube's level.</span>
+              </span>
+            </label>
           </div>
           <div className="mo-field">
             <label className="label" htmlFor="mo-music">
@@ -612,7 +671,7 @@ function ExportPanel({
               {unfinished} scene{unfinished > 1 ? "s are" : " is"} not written yet.
             </p>
           ) : null}
-          <button type="button" className="btn btn-primary" disabled={!!unfinished || !b.scenes.length} onClick={() => onStart(res, { narration: withVoice, sfx: withSfx })}>
+          <button type="button" className="btn btn-primary" disabled={!!unfinished || !b.scenes.length} onClick={() => onStart(res, { narration: withVoice, sfx: withSfx, loudness: evenLoudness })}>
             Export MP4
           </button>
           <p className="muted small">
@@ -623,9 +682,27 @@ function ExportPanel({
       )}
       {job?.state === "done" && job.result ? (
         <div className="mo-export-done">
-          <a className="btn btn-primary btn-small" href={job.result.url} download>
-            Download MP4
-          </a>
+          <div className="mo-export-links">
+            <a className="btn btn-primary btn-small" href={job.result.url} download>
+              Download MP4
+            </a>
+            {/* the captions written with this export (older exports, and older servers, have none) */}
+            {job.result.captions?.srt || job.result.captions?.vtt ? (
+              <>
+                <span className="muted small">Captions</span>
+                {job.result.captions.srt ? (
+                  <a className="btn btn-small" href={job.result.captions.srt} download title="The captions as SRT">
+                    SRT
+                  </a>
+                ) : null}
+                {job.result.captions.vtt ? (
+                  <a className="btn btn-small" href={job.result.captions.vtt} download title="The captions as WebVTT">
+                    VTT
+                  </a>
+                ) : null}
+              </>
+            ) : null}
+          </div>
           <span className="muted small">
             {job.result.width}x{job.result.height}, {job.result.seconds} s, {bytesLabel(job.result.bytes)}, made in {job.result.took} s ({job.result.renderedScenes} rendered,{" "}
             {job.result.cachedScenes} reused)

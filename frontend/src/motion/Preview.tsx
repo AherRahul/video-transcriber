@@ -85,13 +85,23 @@ export default function Preview({ bundle, selectedScene, onSelectScene, onCommen
 
   const post = useCallback((msg: ToPlayer) => frameRef.current?.contentWindow?.postMessage(msg, "*"), []);
 
+  // the last time the page's own playhead (the time, the scrub bar, the scene strip) was redrawn
+  const uiAtRef = useRef(0);
+
   const seek = useCallback(
     (time: number, fromAudio = false) => {
       const d = bundleRef.current.duration;
       const clamped = Math.max(0, Math.min(time, d));
       tRef.current = clamped;
       post({ type: "seek", t: clamped });
-      setT(clamped);
+      // While playing, the picture gets every frame, but the editor around it (the time, the scrub bar and
+      // the scene strip) is redrawn about 15 times a second: re-rendering it on every frame took the time
+      // the picture needed, and frames slipped.
+      const wall = performance.now();
+      if (!fromAudio || wall - uiAtRef.current >= 66) {
+        uiAtRef.current = wall;
+        setT(clamped);
+      }
       const a = audioRef.current;
       if (a && !fromAudio && Math.abs(a.currentTime - clamped) > 0.05) a.currentTime = clamped;
       const m = musicRef.current;
@@ -106,6 +116,8 @@ export default function Preview({ bundle, selectedScene, onSelectScene, onCommen
     cancelAnimationFrame(rafRef.current);
     audioRef.current?.pause();
     musicRef.current?.pause();
+    // the playhead around the picture was redrawn only now and then while playing: show the exact frame
+    setT(tRef.current);
   }, []);
 
   const play = useCallback(() => {
@@ -130,8 +142,21 @@ export default function Preview({ bundle, selectedScene, onSelectScene, onCommen
     let last = tRef.current;
     const loop = () => {
       if (!playingRef.current) return;
+      // The clock is the page's own (performance.now), kept in step with the narration. An <audio>'s
+      // currentTime moves in steps: it holds for a frame or two and then jumps, so reading it every frame
+      // made the animations stall for a moment and skip. Now the narration only pulls the smooth clock
+      // gently toward itself, and is followed at once only after a real jump (a seek or a stall).
       const audio = audioRef.current;
-      const now = audio && !audio.paused && audio.currentTime < (audio.duration || Infinity) ? audio.currentTime : (performance.now() - startRef.current) / 1000;
+      let now = (performance.now() - startRef.current) / 1000;
+      if (audio && !audio.paused && audio.currentTime > 0 && audio.currentTime < (audio.duration || Infinity)) {
+        const drift = audio.currentTime - now;
+        if (Math.abs(drift) > 0.25) {
+          startRef.current -= drift * 1000;
+          now += drift;
+        } else {
+          startRef.current -= drift * 1000 * 0.04;
+        }
+      }
       if (now >= bundleRef.current.duration) {
         seek(bundleRef.current.duration, true);
         pause();

@@ -1,11 +1,16 @@
 """
 MP4 exports: one at a time for the whole app (frame capture and x264 use every core), with progress the
 page shows in the editor's top bar. The video is exported as it was when Export was pressed, so edits
-made during an export go into the next one.
+made during an export go into the next one. Each MP4 gets its captions next to it (<same name>.srt and
+.vtt), made from the same moment's narration and voice.
+
+Also here: the narration track and the rendered thumbnail, both built once per content and kept in
+renders/.
 """
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
@@ -37,6 +42,43 @@ def narration_track(store: Store, pid: str, ffmpeg_dir: str | None) -> Path | No
                 if old != out:
                     old.unlink(missing_ok=True)
     return out
+
+
+_thumb_lock = threading.Lock()
+# (project, cheap key) -> the rendered file. Building the bundle to get the content hash reads every scene
+# and voice clip (seconds on a long video), so a thumbnail that hasn't changed is found by its cheap key
+# (store.thumbnail_key: project.json and kit.json only) and the bundle is built only when that key is new.
+_thumb_index: dict[tuple[str, str], Path] = {}
+
+
+def thumbnail_image(store: Store, renderer: rd.RenderService, pid: str, fresh: bool = False) -> tuple[Path, dict | None]:
+    """The YouTube thumbnail as a 1280 x 720 JPEG: renders/thumbnail-<hash>.jpg, rendered once per design (its
+    source, props, the brand and the player's version) and older ones removed. Returns (the file, the layout
+    report); the report is None when the file came from the cache. fresh renders it again anyway (Claude's
+    write_thumbnail wants the report). A 404 StoreError when the video has no thumbnail yet."""
+    key = store.thumbnail_key(pid, rd.RUNTIME_VERSION)
+    if key is None:
+        raise StoreError("This video has no thumbnail yet.", 404)
+    hit = _thumb_index.get((pid, key))
+    if hit is not None and not fresh and hit.exists():
+        return hit, None  # the fast path: nothing that shows in the picture changed
+    bundle = store.thumbnail_bundle(pid)
+    folder = store.renders_dir(pid)
+    out = folder / f"thumbnail-{rd.thumbnail_hash(bundle)}.jpg"
+    diag = None
+    with _thumb_lock:
+        if fresh or not out.exists():
+            if not renderer.player_built():
+                raise StoreError("The page is not built yet: run `npm run build` in the frontend folder, then try again.", 503)
+            img, diag = renderer.call(renderer.preview_frame, bundle, "thumbnail", rd.THUMBNAIL_AT, rd.THUMBNAIL_WIDTH, 92, timeout=120)
+            tmp = out.with_suffix(".part.jpg")
+            tmp.write_bytes(img)
+            os.replace(tmp, out)
+            for old in folder.glob("thumbnail-*.jpg"):
+                if old != out:
+                    old.unlink(missing_ok=True)
+        _thumb_index[(pid, key)] = out
+    return out, diag
 
 
 class VoiceJobs:
@@ -172,9 +214,10 @@ class Exports:
             snapshot = dict(job)
         self.hub.emit(pid, {"op": "export", "job": snapshot})
 
-    def start(self, pid: str, resolution: int = 1080, narration: bool = True, sfx: bool = True) -> dict:
-        """narration False leaves the voice out; sfx False leaves out the paper sounds (rip, page, pop...).
-        The music bed is the video's soundtrack setting (project.audio)."""
+    def start(self, pid: str, resolution: int = 1080, narration: bool = True, sfx: bool = True, loudness: bool = True) -> dict:
+        """narration False leaves the voice out; sfx False leaves out the paper sounds (rip, page, pop...);
+        loudness False skips bringing the mix to -14 LUFS. The music bed is the video's soundtrack setting
+        (project.audio)."""
         if resolution not in rd.RESOLUTIONS:
             raise StoreError("resolution must be 720, 1080 or 2160")
         with self._lock:
@@ -194,6 +237,9 @@ class Exports:
             raise StoreError("These scenes have no code yet: " + ", ".join(missing) + ". Ask Claude to finish them first.")
         project = self.store.get_project(pid)
         audio = self.store.asset_path(pid, project["audio"]) if project.get("audio") else None
+        # the captions as the video is now (the same moment as the bundle), written next to the MP4 at the end
+        cues = self.store.caption_cues(pid)
+        captions = {"srt": vc.to_srt(cues), "vtt": vc.to_vtt(cues)} if cues else None
         job = {
             "id": uuid.uuid4().hex[:8],
             "state": "queued",
@@ -202,6 +248,7 @@ class Exports:
             "resolution": resolution,
             "narration": narration,
             "sfx": sfx,
+            "loudness": loudness,
             "version": bundle["version"],
             "startedAt": time.time(),
             "updatedAt": time.time(),
@@ -211,7 +258,7 @@ class Exports:
             self._jobs[pid] = job
             self._cancel[pid] = cancel
         self.hub.emit(pid, {"op": "export", "job": dict(job)})
-        self._pool.submit(self._run, pid, bundle, audio, ffmpeg, resolution, cancel, narration, sfx)
+        self._pool.submit(self._run, pid, bundle, audio, ffmpeg, resolution, cancel, narration, sfx, loudness, captions)
         return dict(job)
 
     def cancel(self, pid: str) -> None:
@@ -220,7 +267,10 @@ class Exports:
         if ev:
             ev.set()
 
-    def _run(self, pid, bundle, audio, ffmpeg, resolution, cancel, with_narration: bool = True, with_sfx: bool = True) -> None:
+    def _run(
+        self, pid, bundle, audio, ffmpeg, resolution, cancel, with_narration: bool = True, with_sfx: bool = True,
+        with_loudness: bool = True, captions: dict | None = None,
+    ) -> None:
         if cancel.is_set():
             self._update(pid, state="cancelled", message="Cancelled")
             return
@@ -250,10 +300,19 @@ class Exports:
                 cancel,
                 narration,
                 with_sfx,
+                with_loudness,
                 timeout=6 * 3600,
             )
             rd.prune_cache(folder / "cache")
-            self._update(pid, state="done", percent=100.0, message="Done", result={**result, "url": f"/api/motion/projects/{pid}/renders/{result['file']}"})
+            # the captions under the MP4's own name, so the two travel together (YouTube takes either file)
+            links = None
+            if captions:
+                links = {}
+                for fmt, text in captions.items():
+                    f = out.with_suffix("." + fmt)
+                    f.write_text(text, encoding="utf-8", newline="\n")
+                    links[fmt] = f"/api/motion/projects/{pid}/renders/{f.name}"
+            self._update(pid, state="done", percent=100.0, message="Done", result={**result, "url": f"/api/motion/projects/{pid}/renders/{result['file']}", "captions": links})
         except rd.Cancelled:
             self._update(pid, state="cancelled", message="Cancelled")
         except (rd.RenderError, StoreError) as err:

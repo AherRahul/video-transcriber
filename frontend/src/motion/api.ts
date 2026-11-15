@@ -5,6 +5,7 @@ import type {
   Aspect,
   BrandExtraction,
   BrandKit,
+  CaptionFormat,
   ChatState,
   CommentTarget,
   ExportJob,
@@ -15,6 +16,7 @@ import type {
   ProjectView,
   Pronunciation,
   ScriptView,
+  ThumbnailSource,
   VoiceJob,
   VoiceStatus,
 } from "./types";
@@ -57,8 +59,11 @@ export const motionApi = {
     sourceUrl?: string;
     settings?: Record<string, string>;
     targetSeconds?: number;
+    /** a transcription job whose screenshots come along as layout references (ref-<mm>m<ss>s.jpg assets) */
+    framesJob?: string;
   }) =>
-    call<{ project: Project; attachments: string[] }>("/projects", json("POST", body)),
+    // references: how many screenshots came along
+    call<{ project: Project; attachments: string[]; references: number }>("/projects", json("POST", body)),
   getProject: (id: string) => call<ProjectView>(`/projects/${id}`),
   patchProject: (id: string, body: Record<string, unknown>) => call<ProjectView>(`/projects/${id}`, json("PATCH", body)),
   deleteProject: (id: string) => call<{ ok: boolean }>(`/projects/${id}`, { method: "DELETE" }),
@@ -98,10 +103,41 @@ export const motionApi = {
   },
   docUrl: (id: string, name: string) => `${BASE}/projects/${id}/docs/${encodeURIComponent(name)}`,
 
-  /** narration and sfx default to on; off leaves the voice or the paper sounds out of the MP4 */
-  startExport: (id: string, resolution: number, opts: { narration?: boolean; sfx?: boolean } = {}) =>
-    call<ExportJob>(`/projects/${id}/export`, json("POST", { resolution, narration: opts.narration ?? true, sfx: opts.sfx ?? true })),
+  /** narration and sfx default to on; off leaves the voice or the paper sounds out of the MP4. loudness
+   * (on by default) evens the mix to -14 LUFS, YouTube's level. */
+  startExport: (id: string, resolution: number, opts: { narration?: boolean; sfx?: boolean; loudness?: boolean } = {}) =>
+    call<ExportJob>(
+      `/projects/${id}/export`,
+      json("POST", { resolution, narration: opts.narration ?? true, sfx: opts.sfx ?? true, loudness: opts.loudness ?? true }),
+    ),
   cancelExport: (id: string) => call<{ ok: boolean }>(`/projects/${id}/export/cancel`, { method: "POST" }),
+
+  // ── publishing: the captions and the thumbnail for the YouTube or Udemy upload ──
+
+  /** The captions as a file to download, timed from the voice (scenes without a voice use estimates). */
+  captionsUrl: (id: string, format: CaptionFormat) => `${BASE}/projects/${id}/captions.${format}`,
+  /** The captions' text. Throws with .status (404 while the server has no captions route or no narration). */
+  captions: async (id: string, format: CaptionFormat) => {
+    const res = await fetch(`${BASE}/projects/${id}/captions.${format}`);
+    if (!res.ok) {
+      const err = new Error(`${res.status} ${res.statusText}`) as Error & { status?: number };
+      err.status = res.status;
+      throw err;
+    }
+    return res.text();
+  },
+  /** The 1280x720 thumbnail; rev (from project.thumbnail) busts the cache when Claude redesigns it. The
+   * server draws it on the first request after a change, so that one can take 20 s or so. */
+  // v changes with the thumbnail's rev and with what it is drawn from (the brand kit, the frame settings):
+  // the server sends a versioned link as cacheable for a year, so a stale v would show an old picture
+  // the thumbnail, captions, chapters and YOUTUBE.md in one zip named after the video
+  publishKitUrl: (id: string) => `${BASE}/projects/${id}/publish-kit.zip`,
+  thumbnailUrl: (id: string, rev: number, look = "") => `${BASE}/projects/${id}/thumbnail.jpg?v=${rev}${look ? `-${look}` : ""}`,
+  /** The HTML and values the thumbnail is drawn from. */
+  getThumbnail: (id: string) => call<ThumbnailSource>(`/projects/${id}/thumbnail`),
+  /** Saves a new design; the project's thumbnail.rev goes up. baseRev refuses (409) a save over a newer one. */
+  putThumbnail: (id: string, body: { html: string; props?: Record<string, unknown>; baseRev?: number }) =>
+    call<ThumbnailSource & { warnings?: string[]; version?: number }>(`/projects/${id}/thumbnail`, json("PUT", body)),
 
   listKits: () => call<BrandKit[]>("/brand-kits"),
   createKit: (kit: Partial<BrandKit>, opts: { baseKitId?: string; logoUrl?: string | null } = {}) =>
@@ -151,6 +187,17 @@ export function bytesLabel(n: number): string {
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
   if (n >= 1e3) return `${Math.round(n / 1e3)} KB`;
   return `${n} B`;
+}
+
+/** A video title as a file name: "Load balancing, simply" -> "load-balancing-simply". */
+export function fileSlug(title: string): string {
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60)
+    .replace(/-+$/, "");
+  return slug || "motion-video";
 }
 
 export function ago(ts: number): string {

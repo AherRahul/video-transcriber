@@ -23,6 +23,20 @@ export type JobOptions = {
   language?: string;
   model: string;
   forceWhisper: boolean;
+  /** screenshots of the video with what is said at each, taken after the transcript (layout references for Motion) */
+  screenshots: boolean;
+};
+
+/** One screenshot: its time in the video (seconds), its address and what is said around it. */
+export type FrameItem = { t: number; url: string; file: string; text: string };
+
+/** A job's screenshots. off: not asked for; waiting: the transcript comes first; running: being taken;
+ *  done: items are ready; none: none were taken (message says why). */
+export type Frames = {
+  state: "off" | "waiting" | "running" | "done" | "none";
+  percent: number | null;
+  message: string;
+  items: FrameItem[];
 };
 
 export type Health = { ok: boolean; ffmpeg: boolean; models: string[]; defaultModel: string };
@@ -55,6 +69,7 @@ export async function startJob(url: string, opts: JobOptions): Promise<string> {
       language: opts.language?.trim() || null,
       model: opts.model,
       forceWhisper: opts.forceWhisper,
+      screenshots: opts.screenshots,
     }),
   });
   return (await json<{ id: string }>(res)).id;
@@ -66,4 +81,13 @@ export async function getJob(id: string, signal?: AbortSignal): Promise<Job> {
 
 export function downloadUrl(id: string, format: "txt" | "srt" | "vtt", timestamps: boolean): string {
   return `/api/jobs/${id}/download?format=${format}&timestamps=${timestamps}`;
+}
+
+export async function getFrames(id: string, signal?: AbortSignal): Promise<Frames> {
+  return json<Frames>(await fetch(`/api/jobs/${id}/frames`, { signal }));
+}
+
+/** Every screenshot, with REFERENCES.md and references.json, in one zip. */
+export function framesZipUrl(id: string): string {
+  return `/api/jobs/${id}/frames.zip`;
 }

@@ -9,6 +9,8 @@ import tempfile
 # every test works under one temporary folder (deleted at the end), never in motion-data
 TMP = tempfile.mkdtemp(prefix="motion-test-")
 os.environ["MOTION_DATA_DIR"] = os.path.join(TMP, "app-data")
+# the transcriber's screenshots too (the app imports them), never transcriber-data
+os.environ["TRANSCRIBER_DATA_DIR"] = os.path.join(TMP, "transcriber-data")
 # the chat-loop tests use a stand-in API client: never let them reach Claude Code or the API
 os.environ["MOTION_ENGINE"] = "api"
 os.environ.pop("ANTHROPIC_API_KEY", None)
@@ -339,6 +341,14 @@ class SceneCheckTests(unittest.TestCase):
     def test_clean_scene(self):
         self.assertEqual(check_scene(SCENE, {"title": "Hi"}), [])
 
+    def test_code_in_a_panel_is_not_counted_as_words(self):
+        code = "int find(int[] seats, int target) {\n    int left = 0, right = seats.length - 1;\n" * 6
+        src = SCENE + '\n<pre class="p-code" data-id="code-1" data-lang="java">{{code}}</pre>'
+        self.assertFalse([w for w in check_scene(src, {"title": "Hi", "code": code}) if "words of text" in w])
+        # the same words as page text still count
+        src2 = SCENE + '\n<p data-id="para">{{code}}</p>'
+        self.assertTrue([w for w in check_scene(src2, {"title": "Hi", "code": code}) if "words of text" in w])
+
     def test_problems_are_reported(self):
         bad = """<style>.a { color: #ff0000; animation: spin 1s; }</style>
 <div class="a" data-id="x">{{missing}}</div><div data-id="x">Two</div><p>No id here</p>
@@ -656,6 +666,32 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(ev["events"][0]["op"], "reload")
         self.assertEqual(json.loads(c.delete(f"/api/motion/projects/{pid}").text), {"ok": True})
 
+    def test_publish_kit_zip(self):
+        import io
+        import zipfile
+
+        from fastapi.testclient import TestClient
+
+        import app
+
+        c = TestClient(app.app)
+        pid = c.post("/api/motion/projects", json={"title": "Kit Test", "brandKitId": "algoinsight-paper"}).json()["project"]["id"]
+        self.assertEqual(c.get(f"/api/motion/projects/{pid}/publish-kit.zip").status_code, 404)  # nothing to give yet
+        store = Store(store_mod.DATA_DIR)  # the same folder the app works in
+        store.write_storyboard(pid, [
+            {"id": "a", "name": "One", "idea": "x", "transition": "tear", "part": "Part 1 · Start", "narration": "Meera opens the app. <cue/> It works."},
+            {"id": "b", "name": "Two", "idea": "y", "transition": "tear", "part": "Part 2 · Next", "narration": "Then she closes it."},
+        ])
+        store.write_doc(pid, "YOUTUBE.md", "# Titles\n")
+        r = c.get(f"/api/motion/projects/{pid}/publish-kit.zip")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn('filename="kit-test-publish-kit.zip"', r.headers["content-disposition"])
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+        self.assertEqual(sorted(z.namelist()), ["YOUTUBE.md", "kit-test-chapters.txt", "kit-test.srt", "kit-test.vtt"])
+        self.assertTrue(z.read("kit-test.vtt").startswith(b"WEBVTT"))
+        self.assertEqual(z.read("kit-test-chapters.txt").decode().splitlines()[0], "0:00 Part 1 · Start")
+        c.delete(f"/api/motion/projects/{pid}")
+
     def test_video_settings_route(self):
         from fastapi.testclient import TestClient
 
@@ -743,6 +779,581 @@ class ClosingTests(unittest.TestCase):
         self.assertEqual(rows["z"], "ready")  # costs nothing: the cache has these words in this voice
         self.assertIsNotNone(self.store.find_clip(other, t["hash"]))
         self.assertTrue((self.store.voice_dir(other) / f"{t['hash']}.mp3").exists())
+
+
+# ── publishing: captions, the audio finish, the thumbnail, the timing checks ──
+
+
+JPEG = b"\xff\xd8\xff\xe0 a stand-in thumbnail"
+CLEAN_DIAG = {"errors": [], "visible": [{"id": "head", "text": "WAIT LESS"}], "offStage": [], "outsideSafe": [], "inZone": [], "overlaps": [], "crowded": [], "smallText": [], "words": 2}
+THUMB = """<style>.h { font: 800 180px/1 var(--font-display); color: var(--ink); }</style>
+<h1 class="h" data-id="head">{{headline}}</h1>"""
+
+
+class StubRenderer:
+    """A stand-in for the headless browser: records each call and answers it like the real one would."""
+
+    def __init__(self, rows=None):
+        self.calls = []
+        self.rows = rows or []
+
+    def player_built(self):
+        return True
+
+    async def preview_frame(self, *args):  # never awaited: call() answers for it
+        raise AssertionError
+
+    async def audit(self, *args):
+        raise AssertionError
+
+    async def export(self, *args):
+        raise AssertionError
+
+    def call(self, fn, *args, timeout=0):
+        self.calls.append((fn.__name__, args))
+        if fn.__name__ == "preview_frame":
+            return JPEG, dict(CLEAN_DIAG)
+        if fn.__name__ == "audit":
+            return self.rows
+        if fn.__name__ == "export":
+            return {"file": args[3].name, "bytes": 1, "width": 1920, "height": 1080, "seconds": 1.0, "renderedScenes": 1, "cachedScenes": 0, "took": 0.1, "loudness": None}
+        raise AssertionError(fn.__name__)
+
+
+class CaptionTests(unittest.TestCase):
+    """The captions: the written narration, timed by the voice (or the estimate before it exists)."""
+
+    NARRATION = "An LLM reads the whole question first. <cue/> Then it writes the answer, one word at a time."
+
+    def setUp(self):
+        self.store = new_store()
+        self.pid = self.store.create_project("Captions", "16:9", "algoinsight-paper")["id"]
+        self.store.write_storyboard(self.pid, [
+            {"id": "a", "name": "One", "idea": "x", "transition": "tear", "narration": self.NARRATION},
+            {"id": "b", "name": "Two", "idea": "y", "transition": "turn", "narration": "The second page has no voice yet."},
+        ])
+
+    def voice_scene_a(self, step=0.06):
+        """A fake clip for scene a: every character of the spoken text `step` seconds after the one before."""
+        p = self.store.get_project(self.pid)
+        t = self.store.timing(self.pid, p, p["scenes"][0])
+        text = t["spoken"]
+        vc.save_clip(self.store.voice_dir(self.pid), t["hash"], text, b"ID3", [round(step * i, 3) for i in range(len(text))], None)
+        self.store.link_voice(self.pid, "a", t["hash"])
+        return text
+
+    def test_srt_and_vtt_keep_the_written_form(self):
+        srt = self.store.captions(self.pid, "srt")
+        vtt = self.store.captions(self.pid, "vtt")
+        self.assertTrue(srt.startswith("1\n00:00:00,750 --> "), srt[:60])  # the voice starts after the page change
+        self.assertRegex(srt, r"\n\d\d:\d\d:\d\d,\d{3} --> \d\d:\d\d:\d\d,\d{3}\n")
+        self.assertTrue(vtt.startswith("WEBVTT\n\n00:00:00.750 --> "), vtt[:60])
+        self.assertNotRegex(vtt, r"\d\d:\d\d:\d\d,\d{3}")  # VTT times use a full stop
+        for text in (srt, vtt):
+            self.assertIn("An LLM reads the whole question first.", text)
+            self.assertNotIn("L-L-M", text)  # the table changes only what the voice is sent
+            self.assertNotIn("cue", text)
+        with self.assertRaises(StoreError):
+            self.store.captions(self.pid, "txt")
+
+    def test_timed_by_the_voice(self):
+        text = self.voice_scene_a()
+        self.assertIn("L-L-M", text)  # the clip said the short form the table's way
+        cues = self.store.caption_cues(self.pid)
+        self.assertEqual(cues[0]["text"], "An LLM reads the whole question first.")
+        self.assertAlmostEqual(cues[0]["start"], 0.75)
+        # the next sentence starts its own caption at the time its first character was spoken
+        then = next(c for c in cues if c["text"].startswith("Then"))
+        self.assertAlmostEqual(then["start"], 0.75 + 0.06 * text.index("Then"), places=3)
+        self.assertLessEqual(cues[0]["end"], then["start"])
+        # the unvoiced second scene: the estimate, from where its voice will start
+        p = self.store.get_project(self.pid)
+        b_start = p["scenes"][0]["duration"]
+        last = cues[-1]
+        self.assertEqual(last["text"], "The second page has no voice yet.")
+        self.assertAlmostEqual(last["start"], b_start + 0.75, places=3)
+
+    def test_cue_lengths_and_lines(self):
+        long = "In the evening rush, Meera opens the app, checks the estimate, and waits for the dosa stall to call her number " * 4
+        self.store.write_script(self.pid, [{"id": "a", "narration": long + "Then she pays and goes home."}])
+        cues = self.store.caption_cues(self.pid)
+        self.assertGreater(len(cues), 6)
+        for i, c in enumerate(cues):
+            lines = vc.caption_lines(c["text"])
+            self.assertIsNotNone(lines, c["text"])
+            self.assertLessEqual(len(lines), 2)
+            self.assertTrue(all(len(ln) <= 42 for ln in lines), lines)
+            self.assertGreaterEqual(c["end"] - c["start"], 1.0 - 1e-6, c)
+            self.assertLessEqual(c["end"] - c["start"], 7.0 + 1e-6, c)
+            if i:
+                self.assertLessEqual(cues[i - 1]["end"], c["start"])  # never overlapping
+        # a caption that has to break mid-sentence breaks at a comma when it can
+        self.assertTrue(any(c["text"].endswith(",") for c in cues), [c["text"] for c in cues])
+
+    def test_a_table_entry_of_two_words_falls_back_to_proportional(self):
+        table = [{"written": "Claude Code", "spoken": "Clawd Code"}]
+        words = "Open Claude Code and ask it".split()
+        text = vc.spoken("Open Claude Code and ask it", table)[0]
+        spans = vc.word_spans(words, table, text)
+        self.assertEqual(len(spans), len(words))
+        self.assertEqual(spans, sorted(spans))
+        self.assertTrue(all(0 <= a < b <= len(text) for a, b in spans))
+        exact = vc.word_spans("An LLM, then".split(), [{"written": "LLM", "spoken": "L-L-M"}], "An L-L-M, then")
+        self.assertEqual(exact, [(0, 2), (3, 9), (10, 14)])  # word by word, the punctuation kept with its word
+
+    def test_routes(self):
+        from fastapi.testclient import TestClient
+
+        import app
+
+        c = TestClient(app.app)
+        pid = c.post("/api/motion/projects", json={"title": "Caption Route", "brandKitId": "algoinsight-paper"}).json()["project"]["id"]
+        Store(store_mod.DATA_DIR).write_storyboard(pid, [{"id": "a", "name": "One", "idea": "x", "transition": "tear", "narration": self.NARRATION}])
+        r = c.get(f"/api/motion/projects/{pid}/captions.srt")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn('filename="caption-route.srt"', r.headers["content-disposition"])
+        self.assertIn("An LLM reads", r.text)
+        r = c.get(f"/api/motion/projects/{pid}/captions.vtt")
+        self.assertTrue(r.text.startswith("WEBVTT"))
+        self.assertIn('filename="caption-route.vtt"', r.headers["content-disposition"])
+        c.delete(f"/api/motion/projects/{pid}")
+
+    def test_the_export_writes_captions_next_to_the_mp4(self):
+        from motion.jobs import Exports
+
+        stub = StubRenderer()
+        exports = Exports(self.store, stub, Hub(self.store), lambda: None)
+        bundle = self.store.bundle(self.pid)
+        cues = self.store.caption_cues(self.pid)
+        exports._jobs[self.pid] = {"state": "queued"}
+        exports._run(self.pid, bundle, None, "ffmpeg", 1080, threading.Event(), True, True, False, {"srt": vc.to_srt(cues), "vtt": vc.to_vtt(cues)})
+        job = exports.status(self.pid)
+        self.assertEqual(job["state"], "done", job)
+        self.assertFalse(stub.calls[0][1][-1])  # loudness off reached the renderer
+        links = job["result"]["captions"]
+        mp4 = job["result"]["file"]
+        for fmt in ("srt", "vtt"):
+            self.assertEqual(links[fmt], f"/api/motion/projects/{self.pid}/renders/{mp4[:-4]}.{fmt}")
+            f = self.store.renders_dir(self.pid) / f"{mp4[:-4]}.{fmt}"
+            self.assertIn("An LLM reads", f.read_text(encoding="utf-8"))
+
+
+def _ffmpeg():
+    """FFmpeg found the way the app finds it (FFMPEG_LOCATION, PATH, then the winget install)."""
+    import transcriber as tr
+
+    return rd.ffmpeg_exe(tr.find_ffmpeg())
+
+
+@unittest.skipUnless(_ffmpeg(), "FFmpeg is not installed")
+class LoudnessTests(unittest.TestCase):
+    """The export's audio finish on generated tones: the music ducked under the voice, the mix at -14 LUFS."""
+
+    TOTAL = 12.0
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+
+        cls.ff = _ffmpeg()
+        cls.dir = Path(tempfile.mkdtemp(prefix="mix-", dir=TMP))
+
+        def make(*args):
+            subprocess.run([cls.ff, "-hide_banner", "-loglevel", "error", "-y", *args], check=True, timeout=120)
+
+        t = cls.TOTAL
+        make("-f", "lavfi", "-i", f"color=c=black:s=160x90:r=30:d={t}", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(cls.dir / "video.mp4"))
+        # the "voice": a 440 Hz tone, two seconds on and one off (lavfi's sine is 1/8 of full scale: x2.4 is about -12 dBFS)
+        make("-f", "lavfi", "-i", f"sine=frequency=440:sample_rate=48000:duration={t}", "-af", "volume=2.4,volume='if(lt(mod(t,3),2),1,0)':eval=frame", "-c:a", "aac", str(cls.dir / "narration.m4a"))
+        # the "music": a 220 Hz tone at about -6 dBFS
+        make("-f", "lavfi", "-i", f"sine=frequency=220:sample_rate=48000:duration={t}", "-af", "volume=4", "-c:a", "libmp3lame", str(cls.dir / "music.mp3"))
+        # a loud burst as a paper sound, so the mix has peaks too high for a plain linear gain
+        sfx = cls.dir / "assets" / "motion" / "sfx"
+        sfx.mkdir(parents=True)
+        make("-f", "lavfi", "-i", "anoisesrc=d=0.08:c=white:a=1:r=48000:seed=7", "-c:a", "libmp3lame", str(sfx / "stamp.mp3"))
+        cls.rs = rd.RenderService("http://127.0.0.1:9", cls.dir)  # dist_dir: where the paper sounds are found
+
+    def mix(self, name, events=(), loudness=True):
+        import asyncio
+
+        out = self.dir / f"{name}.mp4"
+        report = asyncio.run(self.rs._mix_audio(self.ff, self.dir / "video.mp4", out, self.TOTAL, self.dir / "narration.m4a", self.dir / "music.mp3", list(events), loudness))
+        return report, rd.loudness_of(self.ff, out)
+
+    def test_the_music_is_ducked_by_the_voice(self):
+        _, parts = self.rs._mix_parts(self.TOTAL, self.dir / "narration.m4a", self.dir / "music.mp3", [], base=1)
+        graph = ";".join(parts)
+        self.assertIn("asplit=2[nar][key0]", graph)
+        self.assertIn("[bed][key]sidechaincompress=", graph)  # the voice is the key, the music is compressed
+
+    def test_the_mix_lands_on_minus_14_lufs(self):
+        report, measured = self.mix("tones")
+        self.assertEqual(report["mode"], "linear")
+        self.assertFalse(report["limited"])
+        self.assertLessEqual(abs(measured["integrated"] - (-14.0)), 1.0, measured)
+        _, raw = self.mix("raw", loudness=False)
+        self.assertGreater(abs(raw["integrated"] - measured["integrated"]), 0.5)  # it really changed the level
+
+    def test_high_peaks_are_held_so_the_gain_stays_linear(self):
+        report, measured = self.mix("peaks", [{"t": t, "name": "stamp", "gain": 1.6} for t in (1.0, 4.5, 8.2)])
+        self.assertTrue(report["limited"])
+        self.assertEqual(report["mode"], "linear")
+        self.assertGreater(report["measured"]["truePeak"], -1.5)  # before: over the ceiling
+        self.assertLessEqual(report["truePeak"], -1.5)  # after: the mix leaves loudnorm under it
+        self.assertLessEqual(abs(measured["integrated"] - (-14.0)), 1.0, measured)
+        # the AAC encoder can push a burst of white noise back over a little, never to clipping
+        self.assertLess(measured["truePeak"], 0.0, measured)
+
+
+class ThumbnailTests(unittest.TestCase):
+    """The YouTube thumbnail: stored like a scene, rendered by the player as a one-scene bundle."""
+
+    def setUp(self):
+        self.store = new_store()
+        self.pid = self.store.create_project("Thumbs", "16:9", "algoinsight-paper")["id"]
+        self.store.write_storyboard(self.pid, [{"id": "a", "name": "One", "idea": "x", "transition": "tear", "duration": 3}])
+
+    def test_store_paths(self):
+        self.assertIn("thumbnail: none yet", self.store.state_summary(self.pid))
+        self.assertEqual(self.store.thumbnail_view(self.pid), {"html": None, "props": {}, "rev": 0, "url": None})
+        with self.assertRaises(StoreError) as none:
+            self.store.thumbnail_bundle(self.pid)
+        self.assertEqual(none.exception.status, 404)
+        p, warnings = self.store.write_thumbnail(self.pid, THUMB, {"headline": "Wait less"})
+        self.assertEqual(warnings, [])  # a still needs no script, and two words are fine
+        self.assertEqual(p["thumbnail"]["rev"], 1)
+        self.assertTrue((self.store._dir(self.pid) / "thumbnail.html").exists())
+        self.assertIn('thumbnail: written (rev 1), props {"headline": "Wait less"}', self.store.state_summary(self.pid))
+        b = self.store.thumbnail_bundle(self.pid)
+        self.assertEqual((b["width"], b["height"], b["duration"], b["narration"]), (1600, 900, 3.0, None))
+        self.assertEqual(len(b["scenes"]), 1)
+        s = b["scenes"][0]
+        self.assertEqual((s["id"], s["kind"], s["duration"], s["transition"], s["lead"], s["cues"], s["status"]), ("thumbnail", "thumbnail", 3.0, "cut", 0.3, [0.3], "written"))
+        self.assertEqual(set(self.store.bundle(self.pid)["scenes"][0]) - set(s), set())  # every field a bundle scene has
+        _, warnings = self.store.write_thumbnail(self.pid, THUMB, {"headline": "How the queue really decides who waits"})
+        self.assertTrue(any("3 to 5" in w for w in warnings), warnings)
+        with self.assertRaises(StoreError) as stale:
+            self.store.write_thumbnail(self.pid, THUMB, {"headline": "x"}, base_rev=1)
+        self.assertEqual(stale.exception.status, 409)
+        # a 9:16 video still gets a 16:9 thumbnail
+        reel = self.store.create_project("Reel", "9:16", "algoinsight")["id"]
+        self.store.write_thumbnail(reel, THUMB, {"headline": "Wait less"})
+        self.assertEqual((self.store.thumbnail_bundle(reel)["width"], self.store.thumbnail_bundle(reel)["height"]), (1920, 1080))
+
+    def test_undo_puts_the_thumbnail_back(self):
+        self.store.snapshot(self.pid, "Before: first")
+        self.store.write_thumbnail(self.pid, THUMB, {"headline": "One"})
+        self.store.snapshot(self.pid, "Before: second")
+        self.store.write_thumbnail(self.pid, THUMB.replace("180px", "200px"), {"headline": "Two"})
+        p = self.store.undo(self.pid)
+        self.assertEqual(p["thumbnail"]["props"], {"headline": "One"})
+        self.assertIn("180px", self.store.thumbnail_source(self.pid))
+        p = self.store.undo(self.pid)
+        self.assertIsNone(p["thumbnail"])
+        self.assertIsNone(self.store.thumbnail_source(self.pid))
+
+    def test_the_tool_saves_renders_and_shows_it(self):
+        stub = StubRenderer()
+        hub = Hub(self.store)
+        agent = ag.Agent(self.store, renderer=stub, hub=hub, exports=None)
+        self.assertIn("write_thumbnail", ag.MUTATING)
+        content, label = agent._tool(self.pid, "write_thumbnail", {"html": THUMB, "props": {"headline": "Wait less"}})
+        self.assertEqual(label, "Designed the thumbnail (rev 1)")
+        self.assertEqual(content[0]["type"], "image")
+        self.assertIn("Thumbnail saved (rev 1)", content[1]["text"])
+        self.assertIn("No layout problems found.", content[1]["text"])
+        name, args = stub.calls[-1]
+        self.assertEqual((name, args[1:]), ("preview_frame", ("thumbnail", 2.95, 1280, 92)))
+        self.assertEqual(args[0]["scenes"][0]["kind"], "thumbnail")
+        shot = self.store.renders_dir(self.pid) / f"thumbnail-{rd.thumbnail_hash(args[0])}.jpg"
+        self.assertEqual(shot.read_bytes(), JPEG)
+        # served from the cache until the design changes
+        from motion.jobs import thumbnail_image
+
+        f, diag = thumbnail_image(self.store, stub, self.pid)
+        self.assertEqual((f, diag, len(stub.calls)), (shot, None, 1))
+        self.store.write_thumbnail(self.pid, THUMB, {"headline": "Wait much less"})
+        f2, _ = thumbnail_image(self.store, stub, self.pid)
+        self.assertNotEqual(f2, shot)
+        self.assertFalse(shot.exists())  # the old picture is removed
+        frames = [e for e in hub.log(self.pid) if e["kind"] == "frame"]
+        self.assertEqual(frames[0]["sceneId"], "thumbnail")
+
+    def test_an_unchanged_thumbnail_is_served_without_building_the_bundle(self):
+        from motion.jobs import thumbnail_image
+
+        stub = StubRenderer()
+        self.store.write_thumbnail(self.pid, THUMB, {"headline": "Wait less"})
+        first, _ = thumbnail_image(self.store, stub, self.pid)
+        with mock.patch.object(self.store, "thumbnail_bundle", side_effect=AssertionError("the bundle was built")):
+            again, diag = thumbnail_image(self.store, stub, self.pid)
+            before = self.store.thumbnail_key(self.pid, rd.RUNTIME_VERSION)
+            self.store.write_script(self.pid, [{"id": "a", "label": "A NEW LABEL"}])  # a scene edit: not in the picture
+            self.assertEqual(self.store.thumbnail_key(self.pid, rd.RUNTIME_VERSION), before)
+            self.assertEqual(thumbnail_image(self.store, stub, self.pid)[0], first)
+        self.assertEqual((again, diag, len(stub.calls)), (first, None, 1))
+        key = self.store.thumbnail_key(self.pid, rd.RUNTIME_VERSION)
+        self.store.update_kit("algoinsight-paper", {"tagline": "A NEW TAGLINE"})  # the brand shows in the picture: a new key
+        self.assertNotEqual(self.store.thumbnail_key(self.pid, rd.RUNTIME_VERSION), key)
+        # a new player version is a new picture too (any version other than the current one)
+        self.assertNotEqual(self.store.thumbnail_key(self.pid, rd.RUNTIME_VERSION + "-next"), self.store.thumbnail_key(self.pid, rd.RUNTIME_VERSION))
+        view = self.store.thumbnail_view(self.pid, rd.RUNTIME_VERSION)
+        self.assertRegex(view["url"], rf"/api/motion/projects/{self.pid}/thumbnail\.jpg\?v=1-[0-9a-f]{{8}}$")
+
+    def test_routes(self):
+        from fastapi.testclient import TestClient
+
+        import app
+
+        c = TestClient(app.app)
+        pid = c.post("/api/motion/projects", json={"title": "Thumb Route", "brandKitId": "algoinsight-paper"}).json()["project"]["id"]
+        self.assertEqual(c.get(f"/api/motion/projects/{pid}/thumbnail.jpg").status_code, 404)
+        self.assertIsNone(c.get(f"/api/motion/projects/{pid}/thumbnail").json()["html"])
+        r = c.put(f"/api/motion/projects/{pid}/thumbnail", json={"html": THUMB, "props": {"headline": "Wait less"}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual((r.json()["rev"], r.json()["warnings"]), (1, []))
+        got = c.get(f"/api/motion/projects/{pid}/thumbnail").json()
+        self.assertEqual((got["html"], got["props"], got["rev"]), (THUMB, {"headline": "Wait less"}, 1))
+        self.assertEqual(c.put(f"/api/motion/projects/{pid}/thumbnail", json={"html": THUMB, "baseRev": 0}).status_code, 409)
+        # a rendered picture (a stand-in file in the cache, so no browser is needed): a versioned link is kept
+        # by the browser for good, a bare one is checked every time
+        from motion import jobs
+
+        app_store = Store(store_mod.DATA_DIR)
+        shot = app_store.renders_dir(pid) / "thumbnail-test.jpg"
+        shot.write_bytes(JPEG)
+        jobs._thumb_index[(pid, app_store.thumbnail_key(pid, rd.RUNTIME_VERSION))] = shot
+        r = c.get(got["url"])
+        self.assertEqual((r.status_code, r.content), (200, JPEG))
+        self.assertEqual(r.headers["cache-control"], "private, max-age=31536000, immutable")
+        self.assertEqual(c.get(f"/api/motion/projects/{pid}/thumbnail.jpg").headers["cache-control"], "no-cache")
+        r = c.get(f"/api/motion/projects/{pid}/thumbnail.jpg?download=1")
+        self.assertIn('filename="thumb-route-thumbnail.jpg"', r.headers["content-disposition"])
+        c.delete(f"/api/motion/projects/{pid}")
+
+
+class TimingAuditTests(unittest.TestCase):
+    """The player's timing check folded into the audit, and how Claude reads it."""
+
+    def test_diag_lines(self):
+        self.assertEqual(
+            ag._diag_line({"gaps": [[12.4, 19.0]]}),
+            "nothing moves from 12.4 to 19.0 s while the voice talks: add a change, a camera move or a flow there",
+        )
+        # as the audit hands it on: the player's item (nextCue is a time) plus the cue number and the overrun
+        late = {"id": "chip-a", "at": 15.3, "cue": 2, "plus": 3.2, "nextCue": 14.2, "nextIndex": 3, "into": 1.1}
+        self.assertEqual(
+            ag._diag_line({"late": [late]}),
+            "chip-a arrives late: cue(2) + 3.2 s lands 1.1 s into the next phrase (cue(3) at 14.2 s); pin it to cue(3) or shorten the offset",
+        )
+        self.assertEqual(ag._issue_count({"gaps": [[1, 2]], "late": [late]}), 2)
+        after = {"id": "note", "at": 21.0, "cue": 4, "plus": 2.5, "nextCue": 20.4, "nextIndex": None, "into": 0.6}
+        self.assertEqual(
+            ag._diag_line({"late": [after]}),
+            "note arrives late: cue(4) + 2.5 s lands 0.6 s after the voice ends (at 20.4 s); bring it in while the voice still talks, or shorten the offset",
+        )
+
+    def test_audit_folds_in_the_timing_check(self):
+        import asyncio
+
+        class Page:
+            def __init__(self, timing):
+                self.timing = timing
+
+            async def evaluate(self, js, arg=None):
+                if "typeof" in js:
+                    return self.timing is not None
+                if "diagnose" in js:
+                    return dict(CLEAN_DIAG)
+                return self.timing
+
+        scene = {"id": "s1", "source": "<div></div>", "kind": "scene", "duration": 20.0, "cues": [0.75, 5.0, 9.0, 14.2]}
+        bundle = {"projectId": "p", "scenes": [scene]}
+        rs = rd.RenderService("http://127.0.0.1:9", Path(TMP))
+        # the player's report: nextCue is the next phrase's start in seconds (here cue(3), at 14.2 s)
+        for timing, expect in ((None, 0), ({"gaps": [[12.4, 19.0]], "late": [{"id": "chip-a", "at": 15.3, "cue": 2, "plus": 6.3, "nextCue": 14.2}]}, 2)):
+            handle = {"page": Page(timing), "errors": []}
+
+            async def fake_handle(b, handle=handle):
+                return handle
+
+            rs._preview_handle = fake_handle
+            rows = asyncio.run(rs.audit(bundle))
+            timed = [r for r in rows if "gaps" in r or "late" in r]
+            self.assertEqual(len(timed), expect)
+        late = next(r for r in timed if "late" in r)
+        self.assertEqual((late["t"], late["late"][0]["nextIndex"], late["late"][0]["into"]), (15.3, 3, 1.1))  # which cue, from the scene's cue times
+        self.assertIn("cue(2) + 6.3 s lands 1.1 s into the next phrase (cue(3) at 14.2 s)", ag._diag_line(late))
+
+    def test_audit_video_reports_them(self):
+        store = new_store()
+        pid = store.create_project("Audit", "16:9", "algoinsight-paper")["id"]
+        store.write_storyboard(pid, [{"id": "s1", "name": "One", "idea": "x", "transition": "tear", "duration": 20}])
+        rows = [
+            {"id": "s1", "t": 1.45, **CLEAN_DIAG},
+            {"id": "s1", "t": 12.4, "gaps": [[12.4, 19.0]]},
+            {"id": "s1", "t": 15.3, "late": [{"id": "chip-a", "at": 15.3, "cue": 2, "plus": 3.2, "nextCue": 14.2, "nextIndex": 3, "into": 1.1}]},
+        ]
+        agent = ag.Agent(store, renderer=StubRenderer(rows), hub=Hub(store), exports=None)
+        text, label = agent._tool(pid, "audit_video", {})
+        self.assertIn("1 scenes checked at 1 moments and for their timing; 2 problems", text)
+        self.assertIn("- s1 at 12.40 s: nothing moves from 12.4 to 19.0 s while the voice talks", text)
+        self.assertIn("- s1 at 15.30 s: chip-a arrives late: cue(2) + 3.2 s lands 1.1 s into the next phrase", text)
+        self.assertEqual(label, "Audited 1 scenes: 2 problems")
+
+
+def fake_jpeg(width: int, height: int, tag: int = 0) -> bytes:
+    """The start of a JPEG (its size header) and its end: enough for the asset list and an image block."""
+    import struct
+
+    return b"\xff\xd8\xff\xc0\x00\x11\x08" + struct.pack(">HH", height, width) + b"\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01" + bytes([tag]) + b"\xff\xd9"
+
+
+class ReferenceTests(unittest.TestCase):
+    """Screenshots of the source brought in from a transcription: assets, REFERENCES.md, project.references,
+    the state line and view_references (no renderer, no Claude, no voice)."""
+
+    FRAMES = [(75.6, "Workers take jobs | one at a time."), (1.0, "Welcome to the lesson."), (608.2, "")]
+
+    def setUp(self):
+        self.store = new_store()
+        self.pid = self.store.create_project("Refs", "16:9", "algoinsight-paper")["id"]
+        self.src = Path(tempfile.mkdtemp(prefix="frames-", dir=TMP))
+        self.frames = []
+        for i, (t, text) in enumerate(self.FRAMES):
+            f = self.src / f"frame-{i}.jpg"
+            f.write_bytes(fake_jpeg(1280, 720, i))
+            self.frames.append({"t": t, "path": f, "text": text})
+        self.agent = ag.Agent(self.store, renderer=None, hub=Hub(self.store), exports=None)
+
+    def test_import_assets_doc_and_project(self):
+        refs = self.store.add_references(self.pid, self.frames, "Queues, explained", "https://example.com/v")
+        self.assertEqual([r["asset"] for r in refs], ["ref-00m01s.jpg", "ref-01m15s.jpg", "ref-10m08s.jpg"])  # time order
+        p = self.store.get_project(self.pid)
+        self.assertEqual(p["references"], refs)
+        self.assertEqual(p["references"][1], {"t": 75.6, "asset": "ref-01m15s.jpg", "text": "Workers take jobs | one at a time."})
+        assets = {a["name"]: a for a in self.store.list_assets(self.pid)}
+        self.assertEqual((assets["ref-01m15s.jpg"]["width"], assets["ref-01m15s.jpg"]["height"]), (1280, 720))
+        md = self.store.read_doc(self.pid, "REFERENCES.md")
+        self.assertIn("Source: Queues, explained (https://example.com/v)", md)
+        self.assertIn("| Time | Asset | What is said |", md)
+        self.assertIn("| 1:15 | ref-01m15s.jpg | Workers take jobs \\| one at a time. |", md)
+        self.assertIn("| 10:08 | ref-10m08s.jpg | (no speech) |", md)
+        self.assertIn("never copies their layout", md)
+        # the state line, and the references kept out of the assets line
+        self.store.save_asset(self.pid, "logo.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + b"\x00\x00\x00\x10\x00\x00\x00\x10")
+        state = self.store.state_summary(self.pid)
+        self.assertIn("references: 3 screenshots of the source, 0:01-10:08 (view_references", state)
+        assets_line = next(ln for ln in state.splitlines() if ln.startswith("assets: "))
+        self.assertIn("logo.png", assets_line)
+        self.assertNotIn("ref-", assets_line)
+        self.assertEqual(self.store.add_references(self.pid, [{"t": 3, "path": self.src / "missing.jpg", "text": ""}]), [])  # nothing to bring
+
+    def test_view_references(self):
+        content, label = self.agent._tool(self.pid, "view_references", {})
+        self.assertEqual(content, "This video has no screenshots of its source (they come with a transcript made with Screenshots on).")
+        self.store.add_references(self.pid, self.frames)
+
+        content, label = self.agent._tool(self.pid, "view_references", {})
+        images = [b for b in content if b["type"] == "image"]
+        texts = [b["text"] for b in content if b["type"] == "text"]
+        self.assertEqual(len(images), 3)
+        self.assertEqual(images[0]["source"]["media_type"], "image/jpeg")
+        self.assertTrue(texts[0].startswith("3 of 3 screenshots of the whole source, 0:01-10:08. Each image"), texts[0])
+        self.assertIn("never show these screenshots in the video", texts[0])
+        self.assertEqual(texts[2], '[1:15] ref-01m15s.jpg: "Workers take jobs | one at a time."')
+        self.assertEqual(texts[3], "[10:08] ref-10m08s.jpg: (no speech)")
+        self.assertEqual([b["type"] for b in content], ["text", "image", "text", "image", "text", "image", "text"])  # each image, then its time and words
+        self.assertEqual(label, "Looked at 3 screenshots of the source (0:01-10:08)")
+
+        content, label = self.agent._tool(self.pid, "view_references", {"from": "1:00", "to": "1:15"})
+        self.assertEqual(sum(b["type"] == "image" for b in content), 1)  # whole seconds: 75.6 is 1:15
+        self.assertTrue(content[0]["text"].startswith("1 of 1 screenshots between 1:00 and 1:15."))
+        self.assertEqual(label, "Looked at 1 screenshot of the source (1:15-1:15)")
+        content, _ = self.agent._tool(self.pid, "view_references", {"limit": 2})
+        self.assertEqual([b["text"][:6] for b in content if b["type"] == "text"][1:], ["[0:01]", "[10:08"])  # spread: first and last
+        self.assertIn("2 of 3 screenshots", content[0]["text"])
+        self.assertIn("raise limit up to 12", content[0]["text"])
+        content, _ = self.agent._tool(self.pid, "view_references", {"limit": 99})
+        self.assertEqual(sum(b["type"] == "image" for b in content), 3)  # held to 12, and there are 3
+        content, label = self.agent._tool(self.pid, "view_references", {"from": "20:00"})
+        self.assertEqual(content, "No screenshots from 20:00 on. They run from 0:01 to 10:08.")
+        for bad in ({"from": "soon"}, {"to": 5}, {"limit": "six"}):
+            with self.assertRaises(StoreError):
+                self.agent._tool(self.pid, "view_references", bad)
+
+    def test_a_reference_shown_in_a_scene_is_reported(self):
+        self.store.add_references(self.pid, self.frames)
+        self.store.write_storyboard(self.pid, [{"id": "s1", "name": "Hook", "idea": "a", "duration": 3, "transition": "fade"}])
+        html = SCENE.replace("{{title}}", '<img data-id="pic" src="asset://ref-01m15s.jpg">')
+        _, warnings = self.store.write_scene(self.pid, "s1", html, {"title": "Hi"})
+        self.assertTrue(any("ref-01m15s.jpg is a screenshot of the source" in w for w in warnings), warnings)
+        _, warnings = self.store.write_scene(self.pid, "s1", SCENE, {"title": "Hi", "img": "asset://ref-00m01s.jpg"})
+        self.assertTrue(any("ref-00m01s.jpg is a screenshot of the source" in w for w in warnings), warnings)
+        _, warnings = self.store.write_scene(self.pid, "s1", SCENE, {"title": "Hi"})
+        self.assertFalse(any("screenshot of the source" in w for w in warnings))
+
+    def test_list_assets_leaves_them_to_view_references(self):
+        self.store.add_references(self.pid, self.frames)
+        text, _ = self.agent._tool(self.pid, "list_assets", {})
+        self.assertNotIn("ref-01m15s.jpg", text.splitlines()[0])
+        self.assertIn("Also 3 screenshots of the source", text)
+
+    def test_make_a_motion_video_takes_the_frames_along(self):
+        from fastapi.testclient import TestClient
+
+        import app
+        import screenshots
+
+        job = "f00dfeed0001"
+        folder = screenshots.FRAMES_DIR / job
+        folder.mkdir(parents=True, exist_ok=True)
+        manifest = []
+        for i, (t, text) in enumerate(self.FRAMES):
+            name = screenshots.frame_name(t)
+            (folder / name).write_bytes(fake_jpeg(1280, 720, i))
+            manifest.append({"t": t, "file": name, "text": text})
+        (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (folder / "job.json").write_text(json.dumps({"title": "Queues", "url": "https://example.com/v", "state": "done"}), encoding="utf-8")
+
+        c = TestClient(app.app)
+        r = c.post("/api/motion/projects", json={"title": "With refs", "brandKitId": "algoinsight-paper", "sourceText": "[0:00] hi", "sourceTitle": "Queues", "framesJob": job})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["references"], 3)
+        pid = r.json()["project"]["id"]
+        p = c.get(f"/api/motion/projects/{pid}").json()["project"]
+        self.assertEqual([x["asset"] for x in p["references"]], ["ref-00m01s.jpg", "ref-01m15s.jpg", "ref-10m08s.jpg"])
+        self.assertEqual(c.get(f"/api/motion/projects/{pid}/assets/ref-01m15s.jpg").content, fake_jpeg(1280, 720, 0))
+        self.assertIn("| 1:15 | ref-01m15s.jpg |", c.get(f"/api/motion/projects/{pid}/docs/REFERENCES.md").text)
+        # no screenshots, an unknown job or a bad id: the video is still made, without references
+        for bad in ("000000000000", "../../etc", 5):
+            r = c.post("/api/motion/projects", json={"title": "No refs", "framesJob": bad})
+            self.assertEqual((r.status_code, r.json()["references"]), (200, 0))
+            c.delete(f"/api/motion/projects/{r.json()['project']['id']}")
+        c.delete(f"/api/motion/projects/{pid}")
+
+    def test_the_tool_is_wired(self):
+        from motion.prompts import SYSTEM_PROMPT, TOOL_LABELS, TOOLS
+
+        spec = next(t for t in TOOLS if t["name"] == "view_references")
+        self.assertEqual(set(spec["input_schema"]["properties"]), {"from", "to", "limit"})
+        self.assertEqual(spec["input_schema"]["properties"]["limit"]["maximum"], 12)
+        self.assertIn("view_references", TOOL_LABELS)
+        self.assertIn("view_references with the source times", SYSTEM_PROMPT)
+        self.assertIn("Never copy their layout, words, brand, logos, characters, numbers or images", SYSTEM_PROMPT)
+        self.assertIn("never show them in the video", SYSTEM_PROMPT)
+
+
+class PublishingPromptTests(unittest.TestCase):
+    def test_the_prompt_documents_the_new_tools(self):
+        from motion.prompts import SYSTEM_PROMPT, TOOL_LABELS, TOOLS
+
+        self.assertIn("write_thumbnail", {t["name"] for t in TOOLS})
+        self.assertIn("write_thumbnail", TOOL_LABELS)
+        for phrase in ("fx.focus(target, at, opts)", "fx.flow(path, at, opts)", "fx.link(fromEl, toEl, at, opts)", 'class="p-code"', "fx.line(el, n, at)", 'data-carry="key"', "part sting", "bottom-right corner", "write_thumbnail", "captions"):
+            self.assertIn(phrase, SYSTEM_PROMPT)
+        self.assertNotIn("\u2014", SYSTEM_PROMPT)  # hyphens, never em dashes
+        self.assertGreaterEqual(int(rd.RUNTIME_VERSION), 6)  # the player that has these tools (cached scenes redone)
 
 
 if __name__ == "__main__":
