@@ -1005,7 +1005,7 @@ class Agent:
 
 # gaps and late come from the player's timing check (audit_video): stretches where nothing moves while the
 # voice talks, and elements that arrive after the phrase that should bring them has gone by
-ISSUE_KEYS = ("errors", "offStage", "outsideSafe", "inZone", "overlaps", "crowded", "overflow", "smallText", "gaps", "late", "handChart")
+ISSUE_KEYS = ("errors", "offStage", "outsideSafe", "inZone", "overlaps", "crowded", "overflow", "smallText", "gaps", "late", "handChart", "penOver", "curvedArrow")
 
 
 def _issue_count(diag: dict) -> int:
@@ -1059,6 +1059,13 @@ def _diag_line(d: dict) -> str:
         bits.append("too close (under 18 px apart, they look like they touch): " + ", ".join(" + ".join(p) for p in d["crowded"][:4]))
     if d.get("handChart"):
         bits.append("hand-drawn chart: use fx.chart (" + ", ".join(d["handChart"][:4]) + ")")
+    if d.get("penOver"):
+        bits.append(
+            "a red pen mark runs over words or another card (move them apart, or link from a nearer side): "
+            + ", ".join(f"{p[0]} over {p[1]}" for p in d["penOver"][:4])
+        )
+    if d.get("curvedArrow"):
+        bits.append("curved arrow drawn by hand: draw it straight (M x y L x y) or as an elbow (" + ", ".join(d["curvedArrow"][:4]) + ")")
     if d.get("overflow"):
         bits.append(
             "words run into the box's padding or edge (size the box to its words, or shorten them): "

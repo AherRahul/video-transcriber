@@ -73,6 +73,19 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
     atexit.register(renderer.shutdown)
     last_snap: dict[str, tuple[str, float]] = {}  # project -> (what was edited, when), to group quick edits
 
+    def busy() -> dict:
+        """What a restart would cut short: exports, voice jobs and Claude turns in flight. The dev runner
+        (backend/dev.py, run.ps1 -Dev) waits for these before it restarts the server on a code change."""
+        def live(jobs) -> int:
+            with jobs._lock:
+                return sum(1 for j in jobs._jobs.values() if j.get("state") in ("queued", "running"))
+
+        with agent._lock:
+            turns = len(agent._turns)
+        return {"exports": live(exports), "voice": live(voices), "claude": turns}
+
+    app.state.motion_busy = busy
+
     @app.exception_handler(StoreError)
     async def store_error(_: Request, err: StoreError):
         return JSONResponse({"detail": str(err)}, status_code=err.status)

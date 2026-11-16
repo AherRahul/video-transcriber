@@ -420,12 +420,14 @@ video ends on the paper end screen with Watch next, More from the series and Sub
 components (cards, sticky notes, marker headings, pen notes and arrows, ink stamps, badges, recording
 windows) and the entrances (pop, unfold, tear on, write on, marker wipe, draw, stamp slam, crumple) with
 the films' timings. Arrowheads are drawn by the player on the line's real end, and the layout check also
-reports blocks of words closer than 18 px.
+reports blocks of words closer than 18 px, red pen marks (arrows, loops) that run over words or another
+card, and arrows drawn by hand as a curve.
 
 **Animation tools** for explaining, not just revealing: a **camera** that zooms and pans to the part being
 explained and back (`fx.focus`, `fx.unfocus`); the **flow kit**: packets travelling along a path for
-requests and data on the move (`fx.flow`), any element moved along a path (`fx.travel`), a red-pen arrow
-drawn between two elements (`fx.link`), a pen ring around one (`fx.circle`), a bar or queue filling
+requests and data on the move (`fx.flow`), any element moved along a path (`fx.travel`), a straight red-pen
+arrow between two elements (`fx.link`: it bows only to get round something in its way, and a request and
+its reply run side by side), a pen loop that hugs one (`fx.circle`), a bar or queue filling
 (`fx.grow`) and text that changes with a small pop (`fx.change`); **code walkthroughs**: one code panel,
 highlighted with line numbers, typed on line by line (`fx.code`) with a marker band moving to the lines the
 voice explains (`fx.line`). Code on screen is always copied from your files or a real run, never written up
@@ -584,22 +586,33 @@ The terminal running the server shows the full error for anything the page repor
 
 ## 11. For developers
 
-### Run the page in development mode (live reload)
+### Development mode: hot reload for the server and the page
 
-Terminal 1 (the server):
+Terminal 1 (the server, with hot reload, like nodemon):
 
 ```powershell
-.\backend\run.ps1
+.\backend\run.ps1 -Dev
 ```
 
-Terminal 2 (the page):
+It runs the server and watches the backend's Python files (`backend\**\*.py`, tests and `.venv` left out). When one changes, it restarts the server and prints which file it was:
+
+- **It waits for running work.** A change made while an export, a voice job, a Claude turn or a transcription is running (it asks `GET /api/busy`) waits for that work to finish. It says once what it is waiting for, then restarts.
+- **Nothing is left running.** A restart stops the server's whole process tree, the export's headless browser and FFmpeg included.
+- **A crash waits too.** If the server stops on an error (a typo in the file you just saved), it says so and waits for your next save.
+- Type `rs` and Enter to restart at once. Ctrl+C stops it all.
+
+`uvicorn --reload` is not used because on Windows it leaves the export's browser running and cuts an export short without a word.
+
+Terminal 2 (the page, with live reload):
 
 ```powershell
 cd frontend
 npm run dev
 ```
 
-Open http://localhost:5180. Calls to `/api` are passed to the server on port 8765.
+Open http://localhost:5180. A change to the page's code shows at once, without a reload. Calls to `/api` are passed to the server on port 8765. The page at http://127.0.0.1:8765 (and Motion's exports) use the *built* page, so run `npm run build` when you are done.
+
+To run a second copy beside the usual one (a test copy, say), set its port: `$env:TRANSCRIBER_PORT = "8799"; .\backend\run.ps1`.
 
 ### Tests and checks
 
@@ -617,6 +630,7 @@ npx tsc -b                                          # type-check the page
 | Call | What it does |
 |------|--------------|
 | `GET /api/health` | `{ ok, ffmpeg, models, defaultModel }` |
+| `GET /api/busy` | Work a restart would cut short: `{ busy, transcriptions, exports, voice, claude }` (counts). The dev runner waits for it. |
 | `POST /api/jobs` with body `{ "url": "...", "language": "en", "model": "small", "forceWhisper": false, "screenshots": true }` | Starts a transcription and returns `{ "id": "..." }`. Only `url` is required. |
 | `GET /api/jobs/{id}` | `state` (`queued` / `running` / `done` / `error`), `stage`, `percent`, `message`, `transcript` when done, and `frames` (how the screenshots are going) |
 | `GET /api/jobs/{id}/download?format=txt\|srt\|vtt&timestamps=true\|false` | The transcript as a file |
@@ -640,6 +654,7 @@ Invoke-RestMethod "http://127.0.0.1:8765/api/jobs/$($job.id)"
 | `backend/transcriber.py` | `transcribe_url()` runs the whole flow: `fetch_info` → `fetch_captions` (picks the track, reads json3 / VTT / SRT, follows HLS caption playlists, removes rolling repeats) → `download_audio` → `decode_audio` (FFmpeg) → `run_whisper`. Also friendly error messages and the `to_txt` / `to_srt` / `to_vtt` formats. |
 | `backend/screenshots.py` | The screenshots: `download_video` (720p video only), `scene_changes` and `pick_moments` (scene cuts plus the 15 s grid), `extract_frame`, `text_around` (what is said then), `take_screenshots` (all of that on a local file), the job folder, the zip and the 14-day clean-up. |
 | `backend/app.py` | FastAPI: the job queue (one worker thread, jobs in memory, at most 50 kept), the endpoints, and serving `frontend/dist`. |
+| `backend/dev.py` | Hot reload for development (`run.ps1 -Dev`): restarts the server when a backend `.py` file changes, after any running work (`/api/busy`). |
 | `backend/test_transcriber.py` | Offline unit tests (the screenshots run on a test video FFmpeg makes). |
 | `frontend/src/App.tsx` | The page: form, options, progress, transcript, search, copy and download, and the video prompt under a transcript. |
 | `frontend/src/api.ts` | Calls to the server. |

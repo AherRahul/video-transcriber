@@ -22,7 +22,7 @@ import { SplitText } from "gsap/SplitText";
 
 import { buildChart, type ChartSpec } from "./chart";
 import { codeLines, codeStart } from "./code";
-import { center, layoutBox, restBox, svgEl, svgToCam, union, type Box } from "./geometry";
+import { center, hasSurface, layoutBox, radiusOf, restBox, restInk, svgEl, svgToCam, union, withShadow, type Box } from "./geometry";
 
 export type SfxEvent = { sceneId: string; t: number; name: string; gain: number };
 
@@ -205,27 +205,43 @@ const cutMarksOf = (el: Element): Element[] => (el as unknown as TipPath).__cut 
  * pointing along it, so a head can never sit apart from its line or point the wrong way (hand-drawn heads
  * did both). fx.draw shows the tip as the line arrives; fx.exit takes it away with the line.
  */
+/** Where an arrow's tip goes: at its path's end, turned along the last stretch (null for a path with no length). */
+function tipTransform(path: SVGPathElement): string | null {
+  let len = 0;
+  try {
+    len = path.getTotalLength();
+  } catch {
+    return null;
+  }
+  if (!(len > 2)) return null;
+  const end = path.getPointAtLength(len);
+  const back = path.getPointAtLength(Math.max(0, len - Math.min(12, len / 4)));
+  const deg = (Math.atan2(end.y - back.y, end.x - back.x) * 180) / Math.PI;
+  const own = path.getAttribute("transform");
+  return `${own ? own + " " : ""}translate(${end.x.toFixed(2)} ${end.y.toFixed(2)}) rotate(${deg.toFixed(2)})`;
+}
+
 export function arrowTips(root: ParentNode) {
   for (const path of Array.from(root.querySelectorAll<SVGPathElement>("path.p-arrow.head"))) {
     if ((path as TipPath).__tip) continue;
-    let len = 0;
-    try {
-      len = path.getTotalLength();
-    } catch {
-      continue;
-    }
-    if (!(len > 2)) continue;
-    const end = path.getPointAtLength(len);
-    const back = path.getPointAtLength(Math.max(0, len - Math.min(12, len / 4)));
-    const deg = (Math.atan2(end.y - back.y, end.x - back.x) * 180) / Math.PI;
+    const at = tipTransform(path);
+    if (!at) continue;
     const tip = document.createElementNS("http://www.w3.org/2000/svg", "path");
     tip.setAttribute("class", "p-arrow p-arrow-tip");
     tip.setAttribute("d", "M -16 -11 L 0 0 L -16 11");
-    const own = path.getAttribute("transform");
-    tip.setAttribute("transform", `${own ? own + " " : ""}translate(${end.x.toFixed(2)} ${end.y.toFixed(2)}) rotate(${deg.toFixed(2)})`);
+    tip.setAttribute("transform", at);
     path.after(tip);
     (path as TipPath).__tip = tip;
   }
+}
+
+/** True when an element has words of its own (not counting children with their own data-id). */
+function hasOwnWords(el: Element): boolean {
+  for (const n of Array.from(el.childNodes)) {
+    if (n.nodeType === Node.TEXT_NODE && (n.textContent || "").trim()) return true;
+    if (n instanceof Element && !n.hasAttribute("data-id") && !["STYLE", "SCRIPT"].includes(n.tagName) && hasOwnWords(n)) return true;
+  }
+  return false;
 }
 
 export function tearEdges(root: HTMLElement, sceneId: string) {
@@ -573,26 +589,15 @@ function linkEnds(a: Box, b: Box) {
 
 const r1 = (n: number) => (Math.round(n * 10) / 10).toString();
 
-/** A hand-drawn pen loop around a box: a slightly wobbly, slightly turned ellipse that runs on past its start. */
-function circlePath(b: Box, seed: number): string {
-  const r = stream(seed);
-  const c = center(b);
-  // an ellipse through the box's corners is the box's half size times root two; then a little air
-  const rx = (b.w / 2) * Math.SQRT2 + 12;
-  const ry = (b.h / 2) * Math.SQRT2 + 12;
-  const tilt = (r() - 0.5) * 0.12;
-  const start = -Math.PI * 0.62 + (r() - 0.5) * 0.3;
-  const sweep = Math.PI * 2 + 0.42 + r() * 0.18;
-  const n = 11;
-  const pts: { x: number; y: number }[] = [];
-  for (let k = 0; k <= n; k++) {
-    const a = start + (sweep * k) / n;
-    const f = 1 + (r() - 0.5) * 0.06 + 0.04 * (k / n); // a wobble, and a slow spiral so the end runs clear of the start
-    const ex = rx * f * Math.cos(a);
-    const ey = ry * f * Math.sin(a);
-    pts.push({ x: c.x + ex * Math.cos(tilt) - ey * Math.sin(tilt), y: c.y + ex * Math.sin(tilt) + ey * Math.cos(tilt) });
-  }
-  // through the points as a smooth curve (Catmull-Rom as cubic Beziers)
+type Pt = { x: number; y: number };
+
+/** True when a point lies in a box grown by `pad` on every side. */
+const inBox = (p: Pt, b: Box, pad: number) => p.x > b.x - pad && p.x < b.x + b.w + pad && p.y > b.y - pad && p.y < b.y + b.h + pad;
+/** True when two boxes overlap or come within `gap` px of each other. */
+const touches = (a: Box, b: Box, gap: number) => a.x < b.x + b.w + gap && b.x < a.x + a.w + gap && a.y < b.y + b.h + gap && b.y < a.y + a.h + gap;
+
+/** A smooth path through points (Catmull-Rom as cubic Beziers). */
+function smoothPath(pts: Pt[]): string {
   let d = `M ${r1(pts[0].x)} ${r1(pts[0].y)}`;
   for (let k = 0; k < pts.length - 1; k++) {
     const p0 = pts[Math.max(0, k - 1)];
@@ -602,6 +607,73 @@ function circlePath(b: Box, seed: number): string {
     d += ` C ${r1(p1.x + (p2.x - p0.x) / 6)} ${r1(p1.y + (p2.y - p0.y) / 6)}, ${r1(p2.x - (p3.x - p1.x) / 6)} ${r1(p2.y - (p3.y - p1.y) / 6)}, ${r1(p2.x)} ${r1(p2.y)}`;
   }
   return d;
+}
+
+/**
+ * A hand-drawn pen loop that hugs a box: the box's own outline (its corner radius, so a round badge gets a
+ * round loop) grown by `margin` on every side, with a slight wobble, running on a little past its start. It
+ * used to be an ellipse through the box's corners, which on a wide card reached some 60 px past each end,
+ * over the arrows and the words beside it (reported as "the red circle overlaps other words"). A grown
+ * outline keeps exactly `margin` everywhere, corners included. Square corners still get a hand's rounding
+ * (up to 1.8 x margin), small enough that the loop stays at least 4 px clear of the corner. Gives the
+ * points (the overlap check samples them).
+ */
+function loopPoints(b: Box, seed: number, margin: number, radius = 0): Pt[] {
+  const rnd = stream(seed);
+  const x0 = b.x - margin;
+  const y0 = b.y - margin;
+  const w = b.w + 2 * margin;
+  const h = b.h + 2 * margin;
+  // the loop's corner: the box's own radius grown by the margin; a square corner gets a rounding that still
+  // clears it by 4 px (a corner of radius r over a square corner m away clears it by r - (r - m) * root 2)
+  const hand = Math.min(1.8 * margin, (Math.SQRT2 * margin - 4) / (Math.SQRT2 - 1));
+  const r = Math.max(0, Math.min(Math.max(radius + margin, hand), w / 2, h / 2));
+  // the outline as runs and quarter turns, clockwise from the top left corner's end
+  const sx = w - 2 * r;
+  const sy = h - 2 * r;
+  const arc = (Math.PI / 2) * r;
+  const parts: { len: number; at: (u: number) => { p: Pt; n: Pt } }[] = [];
+  const corner = (cx: number, cy: number, a0: number) => ({
+    len: arc,
+    at: (u: number) => {
+      const a = a0 + (Math.PI / 2) * u;
+      return { p: { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) }, n: { x: Math.cos(a), y: Math.sin(a) } };
+    },
+  });
+  parts.push({ len: sx, at: (u) => ({ p: { x: x0 + r + sx * u, y: y0 }, n: { x: 0, y: -1 } }) });
+  parts.push(corner(x0 + w - r, y0 + r, -Math.PI / 2));
+  parts.push({ len: sy, at: (u) => ({ p: { x: x0 + w, y: y0 + r + sy * u }, n: { x: 1, y: 0 } }) });
+  parts.push(corner(x0 + w - r, y0 + h - r, 0));
+  parts.push({ len: sx, at: (u) => ({ p: { x: x0 + w - r - sx * u, y: y0 + h }, n: { x: 0, y: 1 } }) });
+  parts.push(corner(x0 + r, y0 + h - r, Math.PI / 2));
+  parts.push({ len: sy, at: (u) => ({ p: { x: x0, y: y0 + h - r - sy * u }, n: { x: -1, y: 0 } }) });
+  parts.push(corner(x0 + r, y0 + r, Math.PI));
+  const perimeter = parts.reduce((s, q) => s + q.len, 0) || 1;
+  const along = (s: number) => {
+    let left = ((s % perimeter) + perimeter) % perimeter;
+    for (const q of parts) {
+      if (left <= q.len || q === parts[parts.length - 1]) return q.at(q.len ? Math.min(1, left / q.len) : 0);
+      left -= q.len;
+    }
+    return parts[0].at(0);
+  };
+  // the pen starts on the top run, a little in from the left, and runs on past where it began
+  const start = sx * (0.12 + rnd() * 0.12);
+  const over = Math.min(70, perimeter * (0.06 + rnd() * 0.03));
+  const total = perimeter + over;
+  const steps = Math.max(32, Math.min(220, Math.round(total / 9)));
+  const w1 = rnd() * Math.PI * 2;
+  const w2 = rnd() * Math.PI * 2;
+  const pts: Pt[] = [];
+  for (let k = 0; k <= steps; k++) {
+    const s = start + (total * k) / steps;
+    const { p, n } = along(s);
+    const ph = (s / perimeter) * Math.PI * 2;
+    // a hand's wobble (about 1.5 px), and the run-on drifting 3 px out so the end shows past the start
+    const wob = 1.2 * Math.sin(ph * 3 + w1) + 0.6 * Math.sin(ph * 5 + w2) + Math.max(0, ((total * k) / steps - perimeter) / Math.max(1, over)) * 3;
+    pts.push({ x: p.x + n.x * wob, y: p.y + n.y * wob });
+  }
+  return pts;
 }
 
 const escText = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -677,6 +749,180 @@ export function makeFx(tl: gsap.core.Timeline, sceneId: string, sfx: SfxEvent[],
       cam.appendChild(drawings);
     }
     return drawings;
+  };
+  // the words an element shows from a given time on (fx.count's final number, fx.change's text): a loop
+  // drawn later is sized to them, not to what the element holds while the scene is built (fx.count starts
+  // a counter at its first value, so a loop round "25" was sized to "0" and cut through the digits)
+  const shows = new Map<Element, { t: number; text: string }[]>();
+  const willShow = (el: Element, t: number, text: string) => shows.set(el, [...(shows.get(el) ?? []), { t, text }]);
+  /** runs `measure` with every plain-text element in `el` (and `el`) showing its words as of time t */
+  const withTextAt = <T,>(el: Element, t: number, measure: () => T): T => {
+    const put: { node: Element; old: string }[] = [];
+    for (const node of [el, ...Array.from(el.querySelectorAll("*"))]) {
+      const due = (shows.get(node) ?? []).filter((x) => x.t <= t + 1e-6).sort((a, b) => a.t - b.t);
+      // only an element that holds nothing but its words: replacing them can't drop a child a script holds
+      if (!due.length || node.children.length) continue;
+      put.push({ node, old: node.textContent ?? "" });
+      node.textContent = due[due.length - 1].text;
+    }
+    try {
+      return measure();
+    } finally {
+      for (const { node, old } of put.reverse()) node.textContent = old;
+    }
+  };
+  // when elements leave the page (fx.exit, fx.crumple), so a mark drawn later doesn't steer round them
+  const gone = new Map<Element, number>();
+  const leaves = (el: Element, t: number) => gone.set(el, Math.min(gone.get(el) ?? Infinity, t));
+  /** true when the element, or something holding it, has left the page by time t */
+  const goneBy = (el: Element, t: number) => {
+    if (t < 0) return false;
+    for (let n: Element | null = el; n && n !== cam; n = n.parentElement) if ((gone.get(n) ?? Infinity) <= t) return true;
+    return false;
+  };
+  /**
+   * What a pen mark (an fx.link arrow, an fx.circle loop) drawn at `from` must keep clear of, at rest in
+   * stage px: every drawn box (a card, a sticky, a pill, a badge, an image, a small icon; with its hard
+   * shadow) and every line of words on the page. Left out: the elements in `skip` with everything inside
+   * and around them (an arrow leaves its own card, which holds its own title), anything the script has
+   * already taken off the page by then (labels that make way for the diagram), the player's drawings,
+   * page-wide wrappers and a scene's large SVG drawings (their lines are drawings too, not things to steer
+   * round). Something that arrives later still counts: it will sit there while the mark does.
+   */
+  const keepClear = (skip: Element[], from = -1): Box[] => {
+    const out: Box[] = [];
+    const own = skip.map((s) => restBox(s, cam, W));
+    for (const el of Array.from(cam.querySelectorAll("[data-id]"))) {
+      if (el.closest(".p-links") || (el instanceof SVGElement && !(el instanceof SVGSVGElement))) continue;
+      if (goneBy(el, from)) continue;
+      if (skip.some((s) => s === el || s.contains(el) || el.contains(s))) continue;
+      const tag = el.tagName.toLowerCase();
+      const words = hasOwnWords(el);
+      const picture = tag === "img" || tag === "canvas" || tag === "video" || tag === "svg";
+      if (!words && !picture && !hasSurface(el)) continue;
+      const box = restBox(el, cam, W);
+      if (box.w * box.h > W * H * 0.25 || box.w < 1 || box.h < 1) continue;
+      // a box over or around a mark's own element belongs with it (a dashed group round the card a link
+      // reaches, a stacked card behind the one it leaves): a mark may cross that to get where it goes
+      if (own.some((o) => touches(o, box, -1))) continue;
+      if (tag === "svg" && (box.w > 200 || box.h > 200)) continue;
+      out.push(...(words && !hasSurface(el) ? restInk(el, cam, W) : [withShadow(el, box)]));
+    }
+    return out;
+  };
+  // fx.link: the links made so far, by the pair they join (two links on one pair run side by side), and the
+  // paths whose shape something has already used (fx.flow, fx.cut, fx.travel), which can no longer move
+  type Link = { path: SVGPathElement; from: Element; to: Element; at: number; normal: Pt; offset: number; straight: boolean; bow: number };
+  const linksByPair = new Map<string, Link[]>();
+  const LINK_GAP = 26; // px between two links on one pair
+  const shapeUsed = new WeakSet<Element>();
+  const uid = new WeakMap<Element, number>();
+  let uids = 0;
+  /** one key for a pair of elements, whichever way the link runs */
+  const pairKey = (a: Element, b: Element) => {
+    if (!uid.has(a)) uid.set(a, ++uids);
+    if (!uid.has(b)) uid.set(b, ++uids);
+    const x = uid.get(a)!;
+    const y = uid.get(b)!;
+    return x < y ? `${x}|${y}` : `${y}|${x}`;
+  };
+  /**
+   * An arrow's route between two boxes: straight from one facing side to the other. Arrows are straight (a
+   * curve for style says nothing a straight line doesn't). When the straight line would run through words
+   * or a card:
+   *  1. it slides along the two facing sides (13 px at a time, staying 12 px in from their corners), still
+   *     straight: a line beside the thing in the way beats a curve round it. It tries the middle first, then
+   *     alternately toward `side` (+1 up for boxes side by side, right for boxes one above the other) and
+   *     the other way, nearest first;
+   *  2. only when no straight line clears does it bow, by the least amount that clears, toward `side`,
+   *     trying the other side only when that one is blocked (either side when no side was asked for).
+   * `taken` are the links already on this pair: a new one keeps 21 px from where each of them sits and
+   * never bows the way one of them bows, so the two never share a line or cross. `exact` asks for one
+   * straight position only (no slide, no bow). When nothing clears, it stays straight in the middle (the
+   * layout report names what it crosses). Gives the path, whether it is straight and clear, the side it
+   * bows to (0 straight) and where it sits (`offset`, px along `normal`).
+   */
+  type Taken = { offset: number; bow: number };
+  const routeLink = (
+    fromEl: Element,
+    toEl: Element,
+    at: number,
+    o: { side: number; sideAsked: boolean; normal?: Pt | null; taken?: Taken[]; exact?: number },
+  ) => {
+    const A = restBox(fromEl, cam, W);
+    const B = restBox(toEl, cam, W);
+    const ends = linkEnds(A, B);
+    const dx = ends.p1.x - ends.p0.x;
+    const dy = ends.p1.y - ends.p0.y;
+    const len = Math.hypot(dx, dy) || 1;
+    let n = { x: dy / len, y: -dx / len };
+    // side by side "up" is the positive side, one above the other "right" is
+    if (ends.side ? n.y > 0 : n.x < 0) n = { x: -n.x, y: -n.y };
+    const shift = o.normal ?? n;
+    const taken = o.taken ?? [];
+    const clear = keepClear([fromEl, toEl], at);
+    const onStage = (q: Pt) => q.x > 8 && q.x < W - 8 && q.y > 8 && q.y < H - 8;
+    const clearOf = (pts: Pt[]) => pts.every((q) => onStage(q) && !clear.some((b) => inBox(q, b, 8)));
+    const endsAt = (off: number) => ({
+      p0: { x: ends.p0.x + shift.x * off, y: ends.p0.y + shift.y * off },
+      p1: { x: ends.p1.x + shift.x * off, y: ends.p1.y + shift.y * off },
+    });
+    // both ends still on their sides: 12 px in from the sides' corners
+    const onSide = (q: Pt, b: Box) => (ends.side ? q.y >= b.y + 12 && q.y <= b.y + b.h - 12 : q.x >= b.x + 12 && q.x <= b.x + b.w - 12);
+    const fits = (off: number) => {
+      const e = endsAt(off);
+      return off === 0 || (onSide(e.p0, A) && onSide(e.p1, B));
+    };
+    const free = (off: number) => taken.every((t) => Math.abs(t.offset - off) >= LINK_GAP * 0.8);
+    const curve = (p0: Pt, p1: Pt, off: number) => {
+      const c1 = { x: p0.x + dx / 3 + n.x * off, y: p0.y + dy / 3 + n.y * off };
+      const c2 = { x: p0.x + (2 * dx) / 3 + n.x * off, y: p0.y + (2 * dy) / 3 + n.y * off };
+      const steps = Math.max(12, Math.ceil(len / 6));
+      const pts: Pt[] = [];
+      for (let k = 0; k <= steps; k++) {
+        const t = k / steps;
+        const u = 1 - t;
+        pts.push({
+          x: u * u * u * p0.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * p1.x,
+          y: u * u * u * p0.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * p1.y,
+        });
+      }
+      return { c1, c2, pts };
+    };
+    const line = (off: number) => {
+      const e = endsAt(off);
+      return `M ${r1(e.p0.x)} ${r1(e.p0.y)} L ${r1(e.p1.x)} ${r1(e.p1.y)}`;
+    };
+    const straightClear = (off: number) => {
+      const e = endsAt(off);
+      return clearOf(curve(e.p0, e.p1, 0).pts);
+    };
+    if (o.exact !== undefined) return { d: line(o.exact), straight: true, clear: straightClear(o.exact), bow: 0, offset: o.exact, normal: shift };
+    const s = o.side < 0 ? -1 : 1;
+    // every straight position along the sides, the middle first, then nearest first
+    const reach = ends.side ? Math.max(A.h, B.h) : Math.max(A.w, B.w);
+    const places = [0];
+    for (let d = 13; d <= reach; d += 13) places.push(s * d, -s * d);
+    const usable = places.filter((off) => free(off) && fits(off));
+    for (const off of usable) {
+      if (straightClear(off)) return { d: line(off), straight: true, clear: true, bow: 0, offset: off, normal: shift };
+    }
+    // a bow round what is in the way, from the free place nearest the middle
+    const base = usable[0] ?? 0;
+    const e = endsAt(base);
+    const sizes = [0.1, 0.16, 0.24, 0.34, 0.46, 0.6];
+    const tries: number[] = [];
+    if (o.sideAsked) tries.push(...sizes.map((k) => s * k), ...sizes.map((k) => -s * k));
+    else for (const k of sizes) tries.push(s * k, -s * k);
+    for (const k of tries) {
+      if (taken.some((t) => t.bow === Math.sign(k))) continue;
+      const c = curve(e.p0, e.p1, k * len);
+      if (clearOf(c.pts)) {
+        const d = `M ${r1(e.p0.x)} ${r1(e.p0.y)} C ${r1(c.c1.x)} ${r1(c.c1.y)}, ${r1(c.c2.x)} ${r1(c.c2.y)}, ${r1(e.p1.x)} ${r1(e.p1.y)}`;
+        return { d, straight: false, clear: true, bow: Math.sign(k), offset: base, normal: shift };
+      }
+    }
+    return { d: line(base), straight: true, clear: false, bow: 0, offset: base, normal: shift };
   };
   const made = new Set<string>();
   const freshId = (base: string) => {
@@ -817,11 +1063,13 @@ export function makeFx(tl: gsap.core.Timeline, sceneId: string, sfx: SfxEvent[],
       };
       show();
       tl.fromTo(box, { v: from }, { v: to, duration: seconds, ease: "power1.out", onUpdate: show, immediateRender: false }, at);
+      willShow(el, at, to.toLocaleString("en-IN", { minimumFractionDigits: decimals, maximumFractionDigits: decimals }));
     },
     exit(els: Element | Element[], at: number) {
       // a line leaves with its tip and any X that fx.cut drew across it
       const all = list(els).flatMap((el): Element[] => { const tip = tipOf(el); return [...(tip ? [el, tip] : [el]), ...cutMarksOf(el)]; });
       tl.to(all, { autoAlpha: 0, duration: 0.32, ease: "power1.in" }, at);
+      for (const el of list(els)) leaves(el, at + 0.32);
     },
     crumple(els: Element | Element[], at: number) {
       for (const el of list(els)) {
@@ -829,6 +1077,7 @@ export function makeFx(tl: gsap.core.Timeline, sceneId: string, sfx: SfxEvent[],
         tl.to(el, { scaleX: 0.4, scaleY: 0.46, x: 50, y: -40, rotation: "+=90", borderRadius: "50%", duration: 0.3, ease: "power2.in" }, at + 0.22);
         tl.to(el, { scaleX: 0.07, scaleY: 0.08, x: 140, y: -160, rotation: "+=120", duration: 0.23, ease: "power2.in" }, at + 0.52);
         tl.set(el, { autoAlpha: 0 }, at + 0.75);
+        leaves(el, at + 0.75);
       }
       sound("crumple", at);
     },
@@ -881,6 +1130,7 @@ export function makeFx(tl: gsap.core.Timeline, sceneId: string, sfx: SfxEvent[],
     flow(path: Element, at: number, opts: { count?: number; every?: number; seconds?: number; size?: number; color?: string; reverse?: boolean } = {}) {
       const p = path as SVGPathElement;
       if (!(p instanceof SVGElement) || !p.ownerSVGElement || !p.parentNode) return [] as SVGCircleElement[];
+      shapeUsed.add(p);
       mark("flow", [p], at);
       const count = Math.max(1, Math.min(40, Math.round(Number(opts.count ?? 3)) || 1));
       const every = Math.max(0, Number(opts.every ?? 0.3) || 0);
@@ -914,6 +1164,7 @@ export function makeFx(tl: gsap.core.Timeline, sceneId: string, sfx: SfxEvent[],
     /** Moves any element along an SVG path (its centre follows the path; start the path where it is). */
     travel(els: Element | Element[], path: Element, at: number, seconds = 1) {
       const p = path as SVGPathElement;
+      shapeUsed.add(p);
       const raw = MotionPathPlugin.stringToRawPath(p.getAttribute?.("d") || "") as unknown as number[][];
       if (!raw.length || !raw[0].length) return;
       for (const el of list(els)) {
@@ -951,32 +1202,49 @@ export function makeFx(tl: gsap.core.Timeline, sceneId: string, sfx: SfxEvent[],
         tl.to(el, { motionPath: { path: d }, duration: seconds, ease: "power1.inOut", immediateRender: false }, at);
       }
     },
-    /** A red-pen arrow from one element to another, between their facing edges as a gentle curve. Returns the
-     *  path (fx.flow can run packets on it). bend: how far it bows (0 straight, negative the other way). */
+    /**
+     * A red-pen arrow from one element to another: a straight line between their facing sides. Returns the
+     * path (fx.flow can run packets on it). It bows only to get round something in its way (words or a card
+     * on the straight line), by the least amount that clears; `bend` only says which way round (positive: up
+     * for boxes side by side, right for boxes one above the other; negative the other way), its size is not
+     * used. A second link on the same pair (a request and its reply) runs beside the first, 26 px apart.
+     */
     link(fromEl: Element, toEl: Element, at: number, opts: { bend?: number; seconds?: number } = {}) {
-      const ends = linkEnds(restBox(fromEl, cam, W), restBox(toEl, cam, W));
-      const { p0, p1 } = ends;
-      const dx = p1.x - p0.x;
-      const dy = p1.y - p0.y;
-      const len = Math.hypot(dx, dy) || 1;
-      let nx = dy / len;
-      let ny = -dx / len;
-      // side by side it bows upward, one above the other it bows to the right
-      if (ends.side ? ny > 0 : nx < 0) {
-        nx = -nx;
-        ny = -ny;
+      const asked = Number(opts.bend);
+      const sideAsked = Number.isFinite(asked) && asked !== 0;
+      const side = sideAsked ? Math.sign(asked) : 1;
+      const key = pairKey(fromEl, toEl);
+      const pair = linksByPair.get(key) ?? [];
+      const first = pair[0];
+      let route = routeLink(fromEl, toEl, at, { side, sideAsked, normal: first?.normal ?? null, taken: pair });
+      // a request and its reply with nothing in the way sit centred, half the gap either side of the middle
+      // (the first moves too, while nothing has used its shape yet)
+      if (pair.length === 1 && first.straight && first.offset === 0 && route.straight && route.clear && Math.abs(route.offset) === LINK_GAP && !shapeUsed.has(first.path)) {
+        const half = Math.sign(route.offset) * (LINK_GAP / 2);
+        const moved = routeLink(first.from, first.to, first.at, { side: 1, sideAsked: false, normal: first.normal, exact: -half });
+        const mine = routeLink(fromEl, toEl, at, { side, sideAsked, normal: first.normal, exact: half });
+        if (moved.clear && mine.clear) {
+          first.path.setAttribute("d", moved.d);
+          first.offset = moved.offset;
+          const tip = tipOf(first.path);
+          const t = tipTransform(first.path);
+          if (tip && t) tip.setAttribute("transform", t);
+          route = mine;
+        }
       }
-      const off = (Number.isFinite(Number(opts.bend)) ? Number(opts.bend) : 0.12) * len;
-      const c1 = { x: p0.x + dx / 3 + nx * off, y: p0.y + dy / 3 + ny * off };
-      const c2 = { x: p0.x + (2 * dx) / 3 + nx * off, y: p0.y + (2 * dy) / 3 + ny * off };
       const path = svgEl("path", {
         class: "p-arrow head",
-        d: `M ${r1(p0.x)} ${r1(p0.y)} C ${r1(c1.x)} ${r1(c1.y)}, ${r1(c2.x)} ${r1(c2.y)}, ${r1(p1.x)} ${r1(p1.y)}`,
+        d: route.d,
         "data-id": freshId(`link-${idOf(fromEl)}-${idOf(toEl)}`),
+        "data-fx": "link",
+        "data-from": idOf(fromEl),
+        "data-to": idOf(toEl),
       });
       overlay().appendChild(path);
       arrowTips(overlay());
       drawPath(path, at, Math.max(0.05, Number(opts.seconds ?? 0.5) || 0.5));
+      pair.push({ path, from: fromEl, to: toEl, at, normal: route.normal, offset: route.offset, straight: route.straight, bow: route.bow });
+      linksByPair.set(key, pair);
       mark("link", [path], at);
       return path;
     },
@@ -991,6 +1259,7 @@ export function makeFx(tl: gsap.core.Timeline, sceneId: string, sfx: SfxEvent[],
     cut(path: Element, at: number, opts: { where?: number; size?: number } = {}) {
       const p = path as SVGPathElement;
       if (!(p instanceof SVGGeometryElement) || !p.ownerSVGElement) return null;
+      shapeUsed.add(p);
       let len = 0;
       try {
         len = p.getTotalLength();
@@ -1070,14 +1339,37 @@ export function makeFx(tl: gsap.core.Timeline, sceneId: string, sfx: SfxEvent[],
       }
       return x;
     },
-    /** A red-pen loop drawn around an element (a little irregular, the same in every render). */
+    /**
+     * A red-pen loop drawn around an element (a little irregular, the same in every render) that hugs it: a
+     * rounded loop 12 px clear of a card, or of the words themselves for plain text. When that would cross
+     * other words or another card, it is drawn tighter (down to 5 px) until it doesn't; the layout report
+     * names any loop that still does (then move things apart).
+     */
     circle(els: Element | Element[], at: number, seconds = 0.5) {
       const paths: SVGPathElement[] = [];
       for (const el of list(els)) {
+        // measured with the words it shows by then (a counter's final number, not the 0 it starts from)
+        const ink = withTextAt(el, at, () => union(restInk(el, cam, W)) ?? restBox(el, cam, W));
+        const surface = hasSurface(el);
+        // a card with its hard shadow (the loop used to graze the shadow on the right and below)
+        const shadowed = surface ? withShadow(el, ink) : ink;
+        const radius = surface ? radiusOf(el, ink) : 0;
+        const seed = seedOf(`${sceneId}:${idOf(el)}:${++circles}`);
+        // neighbours that touch it are part of the same strip (a bar's next segment, a row's next cell)
+        const clear = keepClear([el], at).filter((b) => !touches(b, ink, 3));
+        let pts: Pt[] = [];
+        const tries: [Box, number][] = [12, 10, 8, 6, 5].map((m) => [shadowed, m]);
+        tries.push([ink, 5], [ink, 4]); // at the tightest, inside the shadow
+        for (const [b, margin] of tries) {
+          pts = loopPoints(b, seed, margin, radius);
+          if (!pts.some((q) => clear.some((c) => inBox(q, c, 3)))) break;
+        }
         const path = svgEl("path", {
           class: "p-arrow",
-          d: circlePath(restBox(el, cam, W), seedOf(`${sceneId}:${idOf(el)}:${++circles}`)),
+          d: smoothPath(pts),
           "data-id": freshId(`circle-${idOf(el)}`),
+          "data-fx": "circle",
+          "data-around": idOf(el),
         });
         overlay().appendChild(path);
         drawPath(path, at, seconds);
@@ -1097,6 +1389,7 @@ export function makeFx(tl: gsap.core.Timeline, sceneId: string, sfx: SfxEvent[],
     change(els: Element | Element[], text: string | number, at: number) {
       for (const el of list(els)) {
         tl.set(el, { text: { value: escText(String(text)) } }, at);
+        willShow(el, at, String(text));
         // two plain tweens (each starts from where the element is), so seeking back never leaves it enlarged
         tl.to(el, { scale: 1.16, duration: 0.09, ease: "power2.out" }, at);
         tl.to(el, { scale: 1, duration: 0.22, ease: "power2.out" }, at + 0.09);

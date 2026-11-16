@@ -37,7 +37,9 @@ from typing import Callable
 
 from . import voice as vc
 
-RUNTIME_VERSION = "7"  # bump when the player changes how a frame looks, so cached scene files are redone
+RUNTIME_VERSION = "8"  # bump when the player changes how a frame looks, so cached scene files are redone
+# 8: fx.link arrows are straight (they bow only to get round words or a card, and a pair runs side by side);
+#    fx.circle loops hug their target instead of an ellipse through its corners that ran over its neighbours
 # 7: the camera keeps the page's top content below the header (a zoom pushed rows over the logo, label
 #    and title); the layout report's overflow check (words running into their box's padding)
 # 4: arrow tips, the slate web address, CSS tilts kept (stamps, stickies, tags), the logo/url settings
@@ -89,9 +91,24 @@ def scene_frames(duration: float, fps: int) -> int:
     return max(1, round(duration * fps))
 
 
-def scene_hashes(bundle: dict, assets_dir: Path | None, ow: int, oh: int) -> list[str]:
+def player_fingerprint(dist_dir: Path | None) -> str:
+    """The built player page's own fingerprint. Vite names each file by a hash of its content and the page
+    names the files it loads, so a rebuild with a changed player changes the page. Scenes rendered by the
+    old player are then redone even when RUNTIME_VERSION was not bumped (a server restarted on the new
+    version before the page was rebuilt used to cache the old look under the new version). Empty when
+    there is no build (tests)."""
+    if not dist_dir:
+        return ""
+    try:
+        return hashlib.sha256((Path(dist_dir) / "motion-player.html").read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
+def scene_hashes(bundle: dict, assets_dir: Path | None, ow: int, oh: int, player: str = "") -> list[str]:
     """One hash per scene from everything that changes its pixels. A scene that fades or slides in also
-    depends on the scene before it, whose last frame shows underneath."""
+    depends on the scene before it, whose last frame shows underneath. `player` is the built player's
+    fingerprint (player_fingerprint)."""
     asset_sig = []
     if assets_dir and assets_dir.exists():
         for f in sorted(assets_dir.iterdir()):
@@ -100,6 +117,7 @@ def scene_hashes(bundle: dict, assets_dir: Path | None, ow: int, oh: int) -> lis
                 asset_sig.append([f.name, st.st_size, st.st_mtime_ns])
     common = {
         "runtime": RUNTIME_VERSION,
+        **({"player": player} if player else {}),
         "stage": [bundle["width"], bundle["height"]],
         "out": [ow, oh],
         "fps": bundle["fps"],
@@ -386,7 +404,7 @@ class RenderService:
             raise RenderError(f"These scenes have no code yet: {missing}. Ask Claude to finish them first.")
         fps = bundle["fps"]
         ow, oh, scale = output_size(bundle["width"], bundle["height"], resolution)
-        hashes = scene_hashes(bundle, assets_dir, ow, oh)
+        hashes = scene_hashes(bundle, assets_dir, ow, oh, player_fingerprint(self.dist_dir))
         cache_dir.mkdir(parents=True, exist_ok=True)
         files = [cache_dir / f"{h}.mp4" for h in hashes]
         todo = [i for i, f in enumerate(files) if not f.exists()]

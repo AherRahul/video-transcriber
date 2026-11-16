@@ -99,6 +99,116 @@ export function restBox(el: Element, cam: Element, stageW: number): Box {
   }
 }
 
+/** True when the element is a drawn box of its own (a card, a sticky, a pill): a fill, a border or a shadow. */
+export function hasSurface(el: Element): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  const cs = getComputedStyle(el);
+  const alpha = (c: string) => {
+    if (!c || c === "transparent") return 0;
+    const m = c.match(/rgba?\(([^)]+)\)/);
+    if (!m) return 1;
+    const parts = m[1].split(/[ ,/]+/).filter(Boolean);
+    return parts.length >= 4 ? parseFloat(parts[3]) : 1;
+  };
+  const border = ["Top", "Right", "Bottom", "Left"].some((s) => parseFloat(cs.getPropertyValue(`border-${s.toLowerCase()}-width`)) > 0.5 && cs.getPropertyValue(`border-${s.toLowerCase()}-style`) !== "none");
+  return alpha(cs.backgroundColor) > 0.15 || cs.backgroundImage !== "none" || border || (cs.boxShadow !== "none" && cs.boxShadow !== "");
+}
+
+/** The element's corner radius in px (its top-left one; "50%" on a round badge is half its short side). */
+export function radiusOf(el: Element, b: Box): number {
+  if (!(el instanceof HTMLElement)) return 0;
+  const raw = getComputedStyle(el).borderTopLeftRadius || "0";
+  const first = raw.split(" ")[0];
+  const r = first.endsWith("%") ? (parseFloat(first) / 100) * Math.min(b.w, b.h) : parseFloat(first);
+  return Math.max(0, Math.min(Number.isFinite(r) ? r : 0, Math.min(b.w, b.h) / 2));
+}
+
+let measurer: CanvasRenderingContext2D | null | undefined;
+
+/**
+ * The band a line of text's ink takes, from the line's box (its top and height in any unit): a text line's
+ * box holds the font's whole ascent and descent, far taller than the glyphs (a 140 px number's box is about
+ * 170 px tall, its digits about 100), and a pen loop or an arrow is judged against the ink.
+ */
+export function inkBand(node: Node, top: number, height: number): [number, number] {
+  const el = node.parentElement;
+  let text = (node.textContent || "").trim();
+  if (!el || !text) return [top, top + height];
+  if (measurer === undefined) measurer = document.createElement("canvas").getContext("2d");
+  if (!measurer) return [top, top + height];
+  const cs = getComputedStyle(el);
+  if (cs.textTransform === "uppercase") text = text.toUpperCase();
+  measurer.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+  const m = measurer.measureText(text);
+  const fa = m.fontBoundingBoxAscent;
+  const fd = m.fontBoundingBoxDescent;
+  if (!(fa + fd > 0) || !Number.isFinite(m.actualBoundingBoxAscent) || !Number.isFinite(m.actualBoundingBoxDescent)) return [top, top + height];
+  const k = height / (fa + fd); // the line box's px per font px (a scaled element)
+  const a = top + Math.max(0, fa - m.actualBoundingBoxAscent) * k;
+  const z = top + Math.min(fa + fd, fa + m.actualBoundingBoxDescent) * k;
+  return z > a ? [a, z] : [top, top + height];
+}
+
+/**
+ * A box grown to take in the element's outer shadows (a card's hard shadow is 10 px of ink to its right and
+ * below). Shadow lengths are CSS px, which are stage px on the page.
+ */
+export function withShadow(el: Element, b: Box): Box {
+  if (!(el instanceof HTMLElement)) return b;
+  const shadow = getComputedStyle(el).boxShadow;
+  if (!shadow || shadow === "none") return b;
+  let x0 = b.x;
+  let y0 = b.y;
+  let x1 = b.x + b.w;
+  let y1 = b.y + b.h;
+  // one shadow per comma that is not inside a colour's brackets
+  for (const one of shadow.split(/,(?![^(]*\))/)) {
+    if (/\binset\b/.test(one)) continue;
+    const px = (one.replace(/rgba?\([^)]*\)|#[0-9a-f]+|[a-z-]+\([^)]*\)/gi, "").match(/-?\d*\.?\d+px/g) || []).map(parseFloat);
+    if (px.length < 2) continue;
+    const [dx, dy, blur = 0, spread = 0] = px;
+    const reach = Math.max(0, blur) + spread;
+    x0 = Math.min(x0, b.x + dx - reach);
+    y0 = Math.min(y0, b.y + dy - reach);
+    x1 = Math.max(x1, b.x + b.w + dx + reach);
+    y1 = Math.max(y1, b.y + b.h + dy + reach);
+  }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+/**
+ * Where an element's ink rests: the whole box for a card or anything drawn (a fill, a border, a shadow, an
+ * image), and for plain words only the lines the words take, as tall as their glyphs (a block of text is
+ * often far wider than its words, and a pen loop or an arrow is judged against what is on the paper).
+ * Boxes in stage px, at rest.
+ */
+export function restInk(el: Element, cam: Element, stageW: number): Box[] {
+  if (!(el instanceof HTMLElement) || hasSurface(el) || el.tagName === "IMG" || el.tagName === "svg" || el.tagName === "CANVAS" || el.tagName === "VIDEO") {
+    return [restBox(el, cam, stageW)];
+  }
+  const saved: Saved = [];
+  try {
+    clearAncestors(el, cam, saved);
+    if (touched(el)) clearProps(el as Styled, TRANSFORM_PROPS, saved);
+    const out: Box[] = [];
+    const range = document.createRange();
+    const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+      if (!(n.textContent || "").trim()) continue;
+      if (n.parentElement && n.parentElement !== el && n.parentElement.closest("svg")) continue;
+      range.selectNodeContents(n);
+      for (const q of Array.from(range.getClientRects())) {
+        if (q.width < 0.5 || q.height < 0.5) continue;
+        const [a, z] = inkBand(n, q.top, q.height); // the glyphs, not the font's whole line box
+        out.push(toCam({ left: q.left, top: a, width: q.width, height: z - a }, cam, stageW));
+      }
+    }
+    return out.length ? out : [toCam(el.getBoundingClientRect(), cam, stageW)];
+  } finally {
+    restore(saved);
+  }
+}
+
 /** The element's layout box with no transform of its own at all (not even the stylesheet's): the box its
  *  x/y translation moves. For fx.travel and the carried copy's placement. */
 export function layoutBox(el: Element, cam: Element, stageW: number): Box {

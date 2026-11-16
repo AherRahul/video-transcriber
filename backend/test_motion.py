@@ -377,6 +377,24 @@ class HashTests(unittest.TestCase):
         moved = rd.scene_hashes(store.bundle(pid), None, 1920, 1080)
         self.assertEqual(after[1:], moved[1:])
 
+    def test_a_rebuilt_player_redoes_every_scene(self):
+        """Scenes cached by an older player build are redone, version bump or not."""
+        store = new_store()
+        pid = store.create_project("P", "16:9")["id"]
+        storyboard(store, pid)
+        for sid in ("s1", "s2", "s3"):
+            store.write_scene(pid, sid, SCENE, {"title": sid})
+        b = store.bundle(pid)
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(rd.player_fingerprint(Path(d)), "")  # no build: the hashes are as they were
+            self.assertEqual(rd.scene_hashes(b, None, 1920, 1080, ""), rd.scene_hashes(b, None, 1920, 1080))
+            page = Path(d) / "motion-player.html"
+            page.write_text('<script src="/assets/player-AAAA.js"></script>', encoding="utf-8")
+            old = rd.scene_hashes(b, None, 1920, 1080, rd.player_fingerprint(Path(d)))
+            page.write_text('<script src="/assets/player-BBBB.js"></script>', encoding="utf-8")  # the player changed
+            new = rd.scene_hashes(b, None, 1920, 1080, rd.player_fingerprint(Path(d)))
+        self.assertTrue(all(x != y for x, y in zip(old, new)))
+
     def test_output_size(self):
         self.assertEqual(rd.output_size(1080, 1920, 720)[:2], (720, 1280))
         self.assertEqual(rd.output_size(1920, 1080, 1080)[:2], (1920, 1080))
@@ -427,6 +445,20 @@ class EngineTests(unittest.TestCase):
 
     def test_tests_never_use_claude_code(self):
         self.assertEqual(ag.default_engine(), "api")
+
+    def test_system_prompt_goes_in_a_file(self):
+        """Inline, the prompt pushed the CLI's command line past Windows' 32,767 characters, so the CLI could
+        not start ("Claude Code not found at ...claude.exe" though the file was there)."""
+        from pathlib import Path
+
+        from motion import claude_code as cc
+        from motion.prompts import CLAUDE_CODE_NOTE, SYSTEM_PROMPT
+
+        path = Path(cc.system_prompt_file())
+        self.assertEqual(path.read_bytes(), (SYSTEM_PROMPT + CLAUDE_CODE_NOTE).encode("utf-8"))  # exactly, no CRLF
+        self.assertEqual(cc.system_prompt_file(), str(path))  # one file per prompt
+        path.unlink()
+        self.assertTrue(Path(cc.system_prompt_file()).exists())  # written again after the temp folder is cleared
 
 
 class HubTests(unittest.TestCase):
@@ -707,6 +739,42 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(c.get(f"/api/motion/projects/{pid}/bundle").json()["brand"]["showLogo"])
         self.assertEqual(c.patch(f"/api/motion/projects/{pid}", json={"closing": {"promo": True}}).status_code, 400)
         c.delete(f"/api/motion/projects/{pid}")
+
+    def test_busy_route(self):
+        """What the dev runner (dev.py) waits for before a restart: a transcription here, a Motion export."""
+        from fastapi.testclient import TestClient
+
+        import app
+
+        c = TestClient(app.app)
+        self.assertEqual(c.get("/api/busy").json(), {"busy": False, "transcriptions": 0, "exports": 0, "voice": 0, "claude": 0})
+        with app._lock:
+            app._jobs["busytest0001"] = {"id": "busytest0001", "state": "done", "frames": {"state": "running"}}  # screenshots still going
+        try:
+            r = c.get("/api/busy").json()
+            self.assertTrue(r["busy"])
+            self.assertEqual(r["transcriptions"], 1)
+        finally:
+            with app._lock:
+                app._jobs.pop("busytest0001", None)
+        self.assertFalse(c.get("/api/busy").json()["busy"])
+
+
+class DevRunnerTests(unittest.TestCase):
+    def test_why_and_describe(self):
+        import dev
+
+        self.assertEqual(dev.why([dev.RS]), "rs typed")
+        self.assertEqual(dev.why(["motion\\api.py", dev.RS, "app.py", "app.py"]), "app.py, motion\\api.py changed")
+        self.assertEqual(dev.describe({"busy": True, "transcriptions": 0, "exports": 1, "voice": 2, "claude": 0}), "1 export, 2 voice jobs")
+
+    def test_snapshot_skips_tests_and_venv(self):
+        import dev
+
+        files = [os.path.relpath(p, dev.HERE) for p in dev.snapshot()]
+        self.assertIn("app.py", files)
+        self.assertIn(os.path.join("motion", "api.py"), files)
+        self.assertFalse(any(f.startswith(".venv") or os.path.basename(f).startswith("test_") for f in files))
 
 
 class ClosingTests(unittest.TestCase):
@@ -1152,6 +1220,14 @@ class TimingAuditTests(unittest.TestCase):
             ag._diag_line({"late": [after]}),
             "note arrives late: cue(4) + 2.5 s lands 0.6 s after the voice ends (at 20.4 s); bring it in while the voice still talks, or shorten the offset",
         )
+
+    def test_pen_mark_lines(self):
+        """Straight arrows and hugging loops: the report names a pen mark over words and a curved hand-drawn arrow."""
+        d = {"penOver": [["circle-lb", "a3-label"], ["link-oc-lb", "note"]], "curvedArrow": ["arr-1"]}
+        line = ag._diag_line(d)
+        self.assertIn("a red pen mark runs over words or another card (move them apart, or link from a nearer side): circle-lb over a3-label, link-oc-lb over note", line)
+        self.assertIn("curved arrow drawn by hand: draw it straight (M x y L x y) or as an elbow (arr-1)", line)
+        self.assertEqual(ag._issue_count(d), 3)
 
     def test_audit_folds_in_the_timing_check(self):
         import asyncio
