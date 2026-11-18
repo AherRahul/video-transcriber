@@ -24,11 +24,26 @@ from pathlib import Path
 import anthropic
 
 from . import brand as br
+from . import broll as bl
+from . import kitdata
 from . import render as rd
+from . import voice as vc
 from .hub import Hub
 from .jobs import Exports, thumbnail_image
 from .prompts import ALL_TOOLS, SYSTEM_PROMPT, TOOL_LABELS
-from .store import CLOSING_KINDS, Store, StoreError, asset_kind, clock_seconds, coverage, fmt_clock, image_size, ref_clock, safe_asset_name, target_from_source
+from .store import (
+    CLOSING_KINDS,
+    THUMBNAIL_WORDS,
+    Store,
+    StoreError,
+    asset_kind,
+    clock_seconds,
+    fmt_clock,
+    image_size,
+    ref_clock,
+    safe_asset_name,
+    thumbnail_colour_warnings,
+)
 
 # Prices in US dollars per million tokens: input, output, cache read. Cache writes cost 1.25x input.
 MODELS: dict[str, dict] = {
@@ -42,7 +57,7 @@ DEFAULT_EFFORT = os.environ.get("MOTION_EFFORT") if os.environ.get("MOTION_EFFOR
 MAX_STEPS = 250  # API calls per turn (a 30 minute video is about 80 scenes, each written, checked and fixed)
 MAX_NUDGES = 30  # times one turn sends Claude back to an unfinished build
 MAX_ACTIVE_TURNS = 2  # turns running at once across all videos
-MUTATING = {"write_storyboard", "write_script", "set_pronunciations", "write_scene", "patch_scene", "set_props", "update_timeline", "save_brand_kit", "use_brand_kit", "import_asset", "write_thumbnail"}
+MUTATING = {"write_storyboard", "write_script", "set_pronunciations", "write_scene", "patch_scene", "set_props", "update_timeline", "save_brand_kit", "use_brand_kit", "import_asset", "write_thumbnail", "write_details", "import_broll"}
 ENGINES = ("claude-code", "api")
 TIMESTAMP_RE = re.compile(r"(?<![\d:])(?:(\d{1,2}):)?(\d{1,2}):(\d{2})(?:[.,]\d{1,3})?(?![\d:])")
 TEXT_DOC_EXT = {".txt", ".md", ".csv", ".json", ".srt", ".vtt"}
@@ -517,17 +532,15 @@ class Agent:
             blocks = [{"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": body}, "title": name}]
             seconds = source_seconds(body)
             if seconds >= 60:
-                # A timed source sets the target length (its own length, held to 10 to 30 minutes) and its
-                # timed lines become the points the video must cover. A target the page set from this same
-                # source (its raw length) is replaced by the held one.
-                p = self.store.get_project(pid)
-                target = target_from_source(seconds)
-                if not p.get("targetSeconds") or abs(p["targetSeconds"] - seconds) < 1.5:
-                    self.store.update_project(pid, {"targetSeconds": target})
+                # A timed transcript of another video is a reference: research for the topic (what viewers ask,
+                # what it gets wrong). It sets no length and no points to cover, and the script may not copy it.
                 src = self.store.set_source(pid, name, body) if not self.store.get_source(pid) else None
-                note = f"{name} runs about {fmt_clock(seconds)} by its timestamps, so this video aims for {fmt_clock(target)}."
+                note = (
+                    f"{name} is a reference ({fmt_clock(seconds)} by its timestamps): research for the topic only. "
+                    "Never follow its outline, order, examples or length; the outline comes from the user's own experience and material."
+                )
                 if src:
-                    note += f" Its {len(src['lines'])} timed lines are the points the video must cover: the project state counts them and read_source lists them."
+                    note += f" read_source reads its {len(src['lines'])} timed lines."
                 blocks.append({"type": "text", "text": note})
             return blocks
         return [{"type": "text", "text": f"{note} ({asset_kind(name)}, {len(data) / 1e6:.1f} MB)."}]
@@ -618,8 +631,16 @@ class Agent:
         r = self.store.plan_review(pid)
         if r["problems"]:
             return "Before any scene code, fix:\n- " + "\n- ".join(r["problems"])
-        if r["window"] or r["coverage"]:
-            return "Script check passed: the length, the source coverage and the wording are ready for scene code."
+        if r["waiting"]:
+            w = r["waiting"]
+            slots = sum(len(x["asks"]) for x in w["slots"])
+            return (
+                "Script check passed. Now stop: the user puts the script in their own words and approves it before any scene code "
+                f"({slots} place{'s' if slots != 1 else ''} left for their words). In a few lines, tell them it's ready in Script > Your words, "
+                "list what each place asks for, and end your turn."
+            )
+        if r["window"]:
+            return "Script check passed: the length and the wording are ready for scene code."
         return ""
 
     def _continue_note(self, pid: str, ctx: dict) -> str | None:
@@ -726,12 +747,12 @@ class Agent:
                 raise StoreError("INVALID_INPUT: scenes must be a list.")
             p, notes = s.write_storyboard(
                 pid, scenes, a.get("title"), a.get("aspect"), a.get("brief") if isinstance(a.get("brief"), dict) else None,
-                a.get("targetMinutes"), a.get("sourceSkips"),
+                a.get("targetMinutes"), a.get("plan"), bool(a.get("replaceOwnWords")),
             )
             self._changed(pid, p)
             total = sum(x["duration"] for x in p["scenes"])
             lines = [f'Storyboard saved: "{p["title"]}", {p["aspect"]}, {len(p["scenes"])} scenes, {fmt_clock(total)}.']
-            lines += [f'- {x["id"]} "{x["name"]}" {x["duration"]} s, {x["transition"]}, {x.get("status")}' + (f', covers {", ".join(x["covers"])}' if x.get("covers") else "") for x in p["scenes"]]
+            lines += [f'- {x["id"]} "{x["name"]}" {x["duration"]} s, {x["transition"]}, {x.get("status")}' + (", the user's own words" if x.get("byUser") else "") for x in p["scenes"]]
             if notes:
                 lines.append("Also: " + "; ".join(notes))
             review = self._review_text(pid)
@@ -745,15 +766,22 @@ class Agent:
             props = a.get("props") if isinstance(a.get("props"), dict) else {}
             levers = a.get("levers") if isinstance(a.get("levers"), list) else None
             text = {k: a[k] for k in ("narration", "label", "part") if isinstance(a.get(k), str)}
+            text["replaceOwnWords"] = bool(a.get("replaceOwnWords"))
             current = s._find(s.get_project(pid), sid)
             if current.get("status") != "written":
-                # A build starts only from a finished script: long enough, covering every point of the source,
-                # in its own words. (Rewriting a scene that already has code is an edit and is never held up.)
+                # A build starts only from a finished script: its plan chosen, a length the user set met, its own
+                # wording, and, when the user puts it in their own words first, their approval. (Rewriting a
+                # scene that already has code is an edit and is never held up.)
                 review = s.plan_review(pid)
                 if review["problems"]:
                     raise StoreError(
-                        "Not saved: the script isn't ready for scene code yet. Fix these first (write_script for narration and covers, "
-                        "write_storyboard for more scenes, sourceSkips or a target the user asked for):\n- " + "\n- ".join(review["problems"])
+                        "Not saved: the script isn't ready for scene code yet. Fix these first (write_storyboard for the plan and the scenes, "
+                        "write_script for the narration):\n- " + "\n- ".join(review["problems"])
+                    )
+                if review["waiting"]:
+                    raise StoreError(
+                        "Not saved: the user puts the script in their own words and approves it before any scene code "
+                        "(Script > Your words). Tell them it's ready and end your turn; build the scenes after they approve it."
                     )
             p, warnings = s.write_scene(pid, sid, html, props, levers, a.get("name"), text)
             self._changed(pid, p)
@@ -770,14 +798,19 @@ class Agent:
             entries = a.get("scenes")
             if not isinstance(entries, list):
                 raise StoreError("INVALID_INPUT: scenes must be a list of {id, narration, label, part}.")
-            p, notes = s.write_script(pid, entries, a.get("sourceSkips"))
+            p, notes = s.write_script(pid, entries, bool(a.get("replaceOwnWords")))
             self._changed(pid, p)
             total = sum(x["duration"] for x in p["scenes"])
             words = sum(s.timing(pid, p, x)["words"] for x in p["scenes"])
             msg = f"Script saved for {len(entries)} scene{'s' if len(entries) != 1 else ''}. The video is now about {fmt_clock(total)} ({words:,} spoken words)."
             if p.get("targetSeconds"):
                 diff = (total - p["targetSeconds"]) / p["targetSeconds"] * 100
-                msg += f" Target {fmt_clock(p['targetSeconds'])}: {'+' if diff >= 0 else ''}{diff:.0f} percent."
+                msg += f" The length the user set is {fmt_clock(p['targetSeconds'])}: {'+' if diff >= 0 else ''}{diff:.0f} percent."
+            elif (p.get("plan") or {}).get("minutes"):
+                msg += f" The plan says about {p['plan']['minutes']:g} min."
+            slots = sum(len(vc.slots(x.get("narration") or "")) for x in p["scenes"])
+            if slots:
+                msg += f" {slots} place{'s' if slots != 1 else ''} left for the user's own words."
             if notes:
                 msg += "\nNarration to fix:\n- " + "\n- ".join(notes[:40])
             review = self._review_text(pid)
@@ -788,21 +821,43 @@ class Agent:
         if name == "read_source":
             src = s.get_source(pid)
             if not src:
-                return "This video has no timed source.", "Read the source"
-            p = s.get_project(pid)
-            cov = coverage(src["lines"], p["scenes"], p.get("sourceSkips") or [])
+                return "This video has no reference transcript.", "Read the reference"
             try:
                 lo = clock_seconds(a["from"]) if a.get("from") else 0.0
                 hi = clock_seconds(a["to"]) if a.get("to") else float("inf")
             except ValueError:
                 raise StoreError("INVALID_INPUT: from and to are source times like 1:40.") from None
-            rows = [
-                f"[{fmt_clock(ln['t'])}] {ln['text']}  <- " + (", ".join(who) if who else "NOT COVERED")
-                for ln, who in zip(src["lines"], cov["byLine"])
-                if lo <= ln["t"] <= hi
-            ]
-            head = f"{src['name']} ({fmt_clock(src['seconds'])}): {cov['covered']} of {cov['total']} lines covered by scenes, {cov['skipped']} skipped, {len(cov['missing'])} not covered. Each line shows the scenes whose covers include it."
-            return head + "\n" + "\n".join(rows), f"Read the source ({len(rows)} lines)"
+            rows = [f"[{fmt_clock(ln['t'])}] {ln['text']}" for ln in src["lines"] if lo <= ln["t"] <= hi]
+            head = (
+                f"{src['name']} ({fmt_clock(src['seconds'])}), a reference: research for the topic only (what viewers ask, what it "
+                "gets wrong). Don't follow its outline, order, examples or length, and don't reuse its wording."
+            )
+            return head + "\n" + "\n".join(rows), f"Read the reference ({len(rows)} lines)"
+
+        if name == "read_drawing":
+            # the user's Excalidraw drawing, element by element, for drawing its parts on their own cues
+            fname = self._str(a, "name")
+            info = s.read_drawing(pid, fname)
+            x, y, w, h = info["bounds"]
+            rows = []
+            for e in info["elements"][:400]:
+                bx, by, bw, bh = e["box"]
+                extra = [f'"{e["text"][:80]}"'] if e["text"] else []
+                if e["groups"]:
+                    extra.append("groups " + ",".join(e["groups"]))
+                if e["frame"]:
+                    extra.append(f'frame {e["frame"]}')
+                if e["container"]:
+                    extra.append(f'label of {e["container"]}')
+                if e["name"]:
+                    extra.append(f'named "{e["name"]}"')
+                rows.append(f'- {e["id"]} {e["type"]} at {bx:g},{by:g} size {bw:g}x{bh:g}' + (" " + "; ".join(extra) if extra else ""))
+            head = (
+                f'{fname}: {len(info["elements"])} elements, bounds {x:g},{y:g} size {w:g}x{h:g} (drawing units; the drawing is scaled to fit its x-draw element)'
+                + (f', {info["files"]} embedded image{"s" if info["files"] != 1 else ""}' if info["files"] else "")
+                + ". Draw a part on its own cue with fx.drawPart(el, id or words, at); fx.drawIn draws the rest."
+            )
+            return head + "\n" + "\n".join(rows), f"Read the drawing {fname} ({len(info['elements'])} elements)"
 
         if name == "view_references":
             return self._view_references(pid, a)
@@ -819,6 +874,20 @@ class Agent:
             fname = s.write_doc(pid, self._str(a, "name"), self._str(a, "content"))
             self.hub.emit(pid, {"op": "docs"})
             return f"Saved {fname}. The user sees it under Script > Documents.", f"Wrote {fname}"
+
+        if name == "write_details":
+            yt = a.get("youtube") if isinstance(a.get("youtube"), dict) else None
+            ud = a.get("udemy") if isinstance(a.get("udemy"), dict) else None
+            col = a.get("collection") if isinstance(a.get("collection"), dict) else None
+            if yt is None and ud is None and col is None:
+                raise StoreError("INVALID_INPUT: give youtube, udemy or collection details.")
+            p, warnings = s.write_details(pid, yt, ud, col, bool(a.get("replace")))
+            self._changed(pid, p)
+            done = [k for k, v in (("YouTube", yt), ("Udemy", ud), ("playlist or course", col)) if v is not None]
+            text = "Saved the " + " and ".join(done) + " details. The user sees and edits them in Details."
+            if warnings:
+                text += "\nWorth fixing:\n- " + "\n- ".join(warnings)
+            return text, "Wrote the " + " and ".join(done) + " details"
 
         if name == "read_doc":
             name_ = self._str(a, "name")
@@ -920,13 +989,39 @@ class Agent:
             fname = f"thumbnail-{int(time.time() * 1000)}.jpg"
             (frames / fname).write_bytes(img)  # the chat keeps this version's picture even after the next change
             self.hub.add(pid, {"kind": "frame", "sceneId": "thumbnail", "at": rd.THUMBNAIL_AT, "url": f"/api/motion/projects/{pid}/frames/{fname}", "issues": _issue_count(diag or {})})
-            text = _diag_text("thumbnail", rd.THUMBNAIL_AT, diag or {}, head=f"Thumbnail saved (rev {rev}). The image is the thumbnail at YouTube's 1280 x 720.", max_words=5)
+            text = _diag_text(
+                "thumbnail", rd.THUMBNAIL_AT, diag or {}, head=f"Thumbnail saved (rev {rev}). The first image is the thumbnail at YouTube's 1280 x 720.", max_words=THUMBNAIL_WORDS
+            )
+            # where it has to work: the feed, at 360 x 202, on the white and the dark page, with a colour check
+            content = [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(img).decode()}}]
+            try:
+                length = fmt_clock(sum(float(x.get("duration") or 0) for x in p["scenes"]))
+                kit = s.get_kit(p.get("brandKitId")) or {}
+                channel = kit.get("wordmark") or kit.get("name") or ""
+                feed, stats = self.render.call(self.render.thumbnail_feed, img, p["title"], length, channel, timeout=60)
+                content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(feed).decode()}})
+                text += (
+                    "\nThe second image is the feed view: the thumbnail at YouTube's size between two plain placeholders, on the white page (top) and the dark one (bottom). "
+                    f"Colour check: {round(stats['pale'] * 100)}% pale, {round(stats['dark'] * 100)}% dark, {round(stats['vivid'] * 100)}% strongly coloured."
+                )
+                warnings = warnings + thumbnail_colour_warnings(stats)
+            except Exception as e:  # noqa: BLE001 - the thumbnail itself is saved; the feed view is a check
+                text += f"\n(The feed view couldn't be made: {e})"
             if warnings:
                 text += "\nFix these:\n- " + "\n- ".join(warnings)
-            return [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(img).decode()}},
-                {"type": "text", "text": text},
-            ], f"Designed the thumbnail (rev {rev})"
+            content.append({"type": "text", "text": text})
+            return content, f"Designed the thumbnail (rev {rev})"
+
+        if name == "find_icons":
+            found = kitdata.find_icons(self._str(a, "query"), int(a.get("limit") or 30))
+            lines = []
+            if found["icons"]:
+                lines.append("Icons (data-icon):")
+                lines += [f"- {n}" + (f" ({', '.join(t)})" if t else "") for n, t in found["icons"]]
+            if found["logos"]:
+                lines.append("Logos (data-logo):")
+                lines += [f"- {n}: {label}" for n, label in found["logos"]]
+            return "\n".join(lines) or "Nothing matches: try a broader word (storage, network, message).", f"Found {len(found['icons'])} icons, {len(found['logos'])} logos"
 
         if name == "list_assets":
             # the references (screenshots of the source) are left out: view_references shows them
@@ -936,6 +1031,47 @@ class Agent:
             if refs:
                 text += f"\n(Also {len(refs)} screenshots of the source, ref-*.jpg: layout references for view_references, never to show in the video.)"
             return text, "Listed the files"
+
+        if name == "find_broll":
+            # free stock (Pexels, Pixabay): candidates with their preview pictures, for Claude to look at
+            try:
+                cands = bl.search(
+                    self._str(a, "query"), str(a.get("kind") or "video"), str(a.get("orientation") or "landscape"),
+                    float(a.get("min_seconds") or 0), max(1, min(8, int(a.get("limit") or 6))),
+                )
+            except bl.BrollError as err:
+                return str(err), "Searched for b-roll: nothing to show"
+            if not cands:
+                return "Nothing found: try other plain words (what is in the picture, not the idea it stands for).", "Searched for b-roll: nothing found"
+            lines = [f"{len(cands)} candidates (their pictures follow, numbered the same). Import one with import_broll and its id."]
+            pictures: list[dict] = []
+            for i, c in enumerate(cands, 1):
+                lines.append(f"{i}. {bl.describe(c)}")
+                img = bl.preview(c.get("preview") or "")
+                if img:
+                    pictures.append({"type": "text", "text": f"{i}. {c['id']}"})
+                    pictures.append({"type": "image", "source": {"type": "base64", "media_type": _picture_type(img), "data": base64.standard_b64encode(img).decode()}})
+            lines.append("Both licences are free to use with no credit needed; import_broll keeps the credit in CREDITS.md anyway.")
+            return [{"type": "text", "text": "\n".join(lines)}] + pictures, f"Found {len(cands)} b-roll candidates"
+
+        if name == "import_broll":
+            ffmpeg = rd.ffmpeg_exe(self.exports.find_ffmpeg())
+            if not ffmpeg:
+                raise StoreError("FFmpeg was not found, so stock clips can't be imported.")
+            try:
+                item = bl.import_stock(
+                    s, pid, ffmpeg, self._str(a, "id"),
+                    float(a["from"]) if isinstance(a.get("from"), (int, float)) else None,
+                    float(a["seconds"]) if isinstance(a.get("seconds"), (int, float)) else None,
+                    a.get("name") if isinstance(a.get("name"), str) and a.get("name").strip() else None,
+                )
+            except bl.BrollError as err:
+                raise StoreError(str(err)) from None
+            self.hub.emit(pid, {"op": "assets"})
+            self.hub.emit(pid, {"op": "docs"})
+            facts = f"{item['seconds']:.1f} s, {item['width']} x {item['height']}" + (f" at {item['fps']:g} fps" if item.get("fps") else "") if item["kind"] == "video" else f"{item['width']} x {item['height']}"
+            how = '<video class="p-broll" data-id="..." data-src="asset://' + item["name"] + '"></video>' if item["kind"] == "video" else '<img class="p-broll" data-id="..." src="asset://' + item["name"] + '">'
+            return f"Saved as asset://{item['name']} ({facts}); its credit is in CREDITS.md. Place it with {how} (see B-roll).", f"Imported {item['name']}"
 
         if name == "read_web_page":
             page = br.page_text(self._str(a, "url"))
@@ -1005,7 +1141,7 @@ class Agent:
 
 # gaps and late come from the player's timing check (audit_video): stretches where nothing moves while the
 # voice talks, and elements that arrive after the phrase that should bring them has gone by
-ISSUE_KEYS = ("errors", "offStage", "outsideSafe", "inZone", "overlaps", "crowded", "overflow", "smallText", "gaps", "late", "handChart")
+ISSUE_KEYS = ("errors", "offStage", "outsideSafe", "inZone", "overlaps", "crowded", "overflow", "smallText", "gaps", "late", "handChart", "penOver", "curvedArrow")
 
 
 def _issue_count(diag: dict) -> int:
@@ -1059,6 +1195,13 @@ def _diag_line(d: dict) -> str:
         bits.append("too close (under 18 px apart, they look like they touch): " + ", ".join(" + ".join(p) for p in d["crowded"][:4]))
     if d.get("handChart"):
         bits.append("hand-drawn chart: use fx.chart (" + ", ".join(d["handChart"][:4]) + ")")
+    if d.get("penOver"):
+        bits.append(
+            "a red pen mark runs over words or another card (move them apart, or link from a nearer side): "
+            + ", ".join(f"{p[0]} over {p[1]}" for p in d["penOver"][:4])
+        )
+    if d.get("curvedArrow"):
+        bits.append("curved arrow drawn by hand: draw it straight (M x y L x y) or as an elbow (" + ", ".join(d["curvedArrow"][:4]) + ")")
     if d.get("overflow"):
         bits.append(
             "words run into the box's padding or edge (size the box to its words, or shorten them): "
@@ -1094,3 +1237,14 @@ def _diag_text(sid: str, at: float, d: dict, head: str | None = None, max_words:
     if not _issue_count(d):
         lines.insert(1, "No layout problems found.")
     return "\n".join(lines)
+
+
+def _picture_type(data: bytes) -> str:
+    """The media type of a preview picture from its first bytes (stock previews are mostly JPEG)."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "image/jpeg"

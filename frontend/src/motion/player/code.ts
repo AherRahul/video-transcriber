@@ -286,7 +286,119 @@ export function buildCode(root: ParentNode) {
     const start = Math.max(0, Math.floor(Number(pre.dataset.start) || 1));
     pre.style.setProperty("--p-code-start", String(start - 1));
     pre.style.setProperty("--p-code-gutter", `${String(start + count - 1).length}ch`);
+    // a diff (data-lang="diff", or data-diff on a block in its own language): each added line green, each
+    // removed one red, each hunk header (@@) quiet; the + and - stay in the text as they were written
+    if ((pre.dataset.lang || "").toLowerCase() === "diff" || pre.hasAttribute("data-diff")) {
+      pre.classList.add("p-code-diff");
+      for (const ln of Array.from(pre.querySelectorAll<HTMLElement>(":scope > .p-code-line"))) {
+        const s = ln.textContent || "";
+        if (s.startsWith("@@")) ln.classList.add("p-code-hunk");
+        else if (s.startsWith("+")) ln.classList.add("p-code-add");
+        else if (s.startsWith("-")) ln.classList.add("p-code-del");
+      }
+    }
   }
+  buildTerms(root);
+}
+
+// ── terminals ──
+//
+// A terminal window: <pre class="p-term" data-id="term-1" data-title="bash  ~/shop">{{session}}</pre>, the
+// session written as a prop (so it arrives escaped), verbatim from a real run: a line that starts with the
+// prompt ("$ " by default; data-prompt="PS>" or "#" for another) is a command, every other line its output.
+// When the scene is built the pre becomes a window: a title bar with the three lights, then one line per
+// line of the session (the prompt green, the command bright, the output grey). The text stays exactly what
+// was written (checked, like a code block). fx.term(el, at) plays it: each command typed on, then its output.
+
+export function buildTerms(root: ParentNode) {
+  for (const pre of Array.from(root.querySelectorAll<HTMLElement>(".p-term"))) {
+    if (pre.dataset.termed || pre.children.length) continue;
+    pre.dataset.termed = "1";
+    const text = (pre.textContent || "").replace(/\n$/, "");
+    const prompt = pre.dataset.prompt ?? "$";
+    pre.textContent = "";
+    const bar = document.createElement("span");
+    bar.className = "p-term-bar";
+    bar.innerHTML = '<span class="p-term-lights"><i></i><i></i><i></i></span><span class="p-term-title"></span>';
+    (bar.lastChild as HTMLElement).textContent = pre.dataset.title || "terminal";
+    const body = document.createElement("span");
+    body.className = "p-term-body";
+    const lines = text.split("\n");
+    lines.forEach((line, k) => {
+      const ln = document.createElement("span");
+      ln.className = "p-term-line";
+      if (line === prompt || line.startsWith(prompt + " ")) {
+        ln.classList.add("p-term-cmd");
+        const ps = document.createElement("span");
+        ps.className = "p-term-ps";
+        ps.textContent = line.slice(0, prompt.length);
+        ln.appendChild(ps);
+        ln.appendChild(document.createTextNode(line.slice(prompt.length)));
+      } else {
+        ln.classList.add("p-term-out");
+        ln.textContent = line;
+      }
+      if (k < lines.length - 1) {
+        const nl = document.createElement("span");
+        nl.className = "p-code-nl";
+        nl.textContent = "\n";
+        ln.appendChild(nl);
+      }
+      body.appendChild(ln);
+    });
+    pre.append(bar, body);
+    if (body.textContent !== text) {
+      pre.textContent = text; // never show output that differs from what was written
+      delete pre.dataset.termed;
+    }
+  }
+}
+
+export type TermOpts = {
+  /** seconds per character of a command typed on (0.035), at most maxType seconds for one command (1.6) */
+  perChar?: number;
+  maxType?: number;
+  /** the pause between a command and its output (0.3 s) */
+  pause?: number;
+  /** seconds between two lines of output (0.06) */
+  perLine?: number;
+};
+
+/** Plays a terminal window's session from `at` (or the k-th command at at[k]): each command typed on, then its
+ *  output line by line. Returns when it ends, and the lines, for pinning what comes next. */
+export function playTerm(
+  ctx: { tl: gsap.core.Timeline; sound: (name: string, at: number, gain?: number) => void; mark: (kind: string, els: Element[], at: number) => void },
+  el: Element,
+  at: number | number[],
+  opts: TermOpts = {},
+): { end: number; lines: HTMLElement[] } {
+  const lines = Array.from(el.querySelectorAll<HTMLElement>(":scope > .p-term-body > .p-term-line"));
+  if (!lines.length) throw new Error('fx.term needs a terminal window: <pre class="p-term" data-id="term-1">{{session}}</pre>');
+  const times = (Array.isArray(at) ? at : [at]).map(Number);
+  if (!times.length || !times.every(Number.isFinite)) throw new Error("fx.term needs a time, like cue(1), or one per command");
+  const perChar = Math.max(0.01, opts.perChar ?? 0.035);
+  const maxType = Math.max(0.2, opts.maxType ?? 1.6);
+  const pause = Math.max(0, opts.pause ?? 0.3);
+  const perLine = Math.max(0, opts.perLine ?? 0.06);
+  let t = Math.max(0, times[0]);
+  let cmd = 0;
+  ctx.mark("term", [el], t);
+  for (const ln of lines) {
+    if (ln.classList.contains("p-term-cmd")) {
+      if (cmd > 0 && times[cmd] != null) t = Math.max(t, times[cmd]);
+      cmd++;
+      const chars = (ln.textContent || "").replace(/\n$/, "").length;
+      const dur = Math.min(maxType, Math.max(0.15, chars * perChar));
+      ctx.tl.fromTo(ln, { clipPath: "inset(-6px 100% -6px 0px)" }, { clipPath: "inset(-6px 0% -6px 0px)", duration: dur, ease: `steps(${Math.max(1, Math.min(chars + 1, 80))})` }, t);
+      ctx.tl.set(ln, { clipPath: "none" }, t + dur);
+      ctx.sound("type", t, 0.6);
+      t += dur + pause;
+    } else {
+      ctx.tl.fromTo(ln, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.01 }, t);
+      t += perLine;
+    }
+  }
+  return { end: t, lines };
 }
 
 /** The highlighted block's lines (empty for a block that isn't highlighted). */
@@ -311,4 +423,20 @@ export const CODE_CSS = `
 .p-code-band { position: absolute; left: 8px; right: 8px; top: 0; height: 0; border-radius: 8px; background: var(--c-marker, var(--accent)); z-index: 0; opacity: 0; visibility: hidden; pointer-events: none; }
 .p-code .t-kw { color: #8e3a9e; } .p-code .t-ty { color: #0e6f7c; } .p-code .t-str { color: #2d7a3a; }
 .p-code .t-com { color: #7b8798; } .p-code .t-num { color: #b0560f; } .p-code .t-fn { color: #2a5bb8; }
+.p-code-diff .p-code-line { width: auto; padding: 0 10px 0 14px; border-radius: 4px; }
+.p-code-diff .p-code-line::before { display: none; }
+.p-code-add { background: #dcfce7; box-shadow: inset 5px 0 0 #16a34a; }
+.p-code-del { background: #fee2e2; box-shadow: inset 5px 0 0 #dc2626; }
+.p-code-hunk { color: #6366f1; }
+.p-term { position: relative; display: flex; flex-direction: column; margin: 0; padding: 0; background: #0f172a; border: 4px solid var(--ink); border-radius: 18px; box-shadow: 10px 10px 0 var(--ink); overflow: hidden;
+  white-space: pre; text-align: left; font: 500 22px/1.5 var(--font-mono); color: #e2e8f0; font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
+.p-term-bar { flex: none; display: flex; align-items: center; gap: 14px; height: 46px; padding: 0 16px; background: #1e293b; border-bottom: 3px solid var(--ink); font: 700 22px/1 var(--font-mono); color: #94a3b8; }
+.p-term-lights { display: inline-flex; gap: 8px; }
+.p-term-lights i { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #0f172a; background: #f87171; }
+.p-term-lights i:nth-child(2) { background: #fbbf24; } .p-term-lights i:nth-child(3) { background: #4ade80; }
+.p-term-body { display: block; padding: 16px 22px 18px; }
+.p-term-line { display: block; width: max-content; min-height: 1.5em; }
+.p-term-cmd { color: #f8fafc; font-weight: 700; }
+.p-term-ps { color: #4ade80; }
+.p-term-out { color: #cbd5e1; }
 `;

@@ -1,7 +1,8 @@
 // Publish, the top bar's own menu: everything the YouTube or Udemy upload needs, ready to download.
 //
 // - Everything at once: one zip with the thumbnail, the SRT and VTT captions, the chapters for the
-//   description and YOUTUBE.md (what doesn't exist yet is left out), and the latest exported MP4.
+//   description and DETAILS.md (what doesn't exist yet is left out), and the latest exported MP4 (its link
+//   marks the video downloaded). The fields themselves, with copy buttons, are in Details.
 //
 // - Captions: the SRT and VTT files, timed from the voice (scenes without a voice use estimates, so
 //   the voice is best generated first). They come from the server as text and are saved here, so a
@@ -20,7 +21,8 @@ import type { CaptionFormat, ProjectView } from "./types";
 import { destinationOf } from "./VideoSettings";
 
 /** The chat message the thumbnail button sends. */
-export const THUMBNAIL_TEXT = "Design the YouTube thumbnail for this video with write_thumbnail.";
+export const THUMBNAIL_TEXT =
+  "Design the YouTube thumbnail for this video with write_thumbnail, following The thumbnail: pick the concept first and tell me it in one line, make it bold enough to stand out in the feed view on both the white and the dark page, and keep improving it until it does.";
 
 type Props = {
   projectId: string;
@@ -146,13 +148,15 @@ export default function PublishPanel({ projectId, view, running, onAskThumbnail,
             Download all (.zip)
           </a>
           {latest ? (
-            <a className="btn btn-small" href={latest.url} download={latest.file} title={latest.file}>
+            // ?download=1 marks the video downloaded (Details and the library show it)
+            <a className="btn btn-small" href={motionApi.downloadMp4Url(latest.url)} download={latest.file} title={latest.file}>
               Latest MP4 ({(latest.bytes / 1e6).toFixed(0)} MB)
             </a>
           ) : null}
         </div>
         <span className="muted small">
-          The zip holds the thumbnail, the SRT and VTT captions, the chapters for the description and YOUTUBE.md (titles, description, tags), whichever exist.
+          The zip holds the thumbnail, the SRT and VTT captions, the chapters for the description and DETAILS.md (every {udemy ? "Udemy" : "YouTube"} field from
+          Details), whichever exist.
           {latest ? ` The MP4 is the last export, made ${ago(latest.at)}.` : " No MP4 yet: Export makes it."}
         </span>
       </section>

@@ -2143,3 +2143,578 @@ input.bad {
   font: 0.9rem/1.6 ui-monospace, Consolas, monospace;
   white-space: pre-wrap;
 }
+
+/* ── your words: Claude's draft for the user to rewrite before any scene code ── */
+
+.mo-words {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mo-words-head p {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.mo-words-head code {
+  font-size: 0.85em;
+}
+
+.mo-words-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 0.82rem;
+}
+
+.mo-words-stats span {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.mo-words-stats .ok {
+  background: var(--ok-soft);
+  border-color: transparent;
+  color: var(--ok);
+}
+
+.mo-words-stats .warn {
+  background: var(--warn-soft);
+  border-color: transparent;
+  color: var(--warn);
+}
+
+.mo-words-part {
+  margin: 8px 0 0;
+  font-size: 0.95rem;
+  color: var(--primary);
+}
+
+.mo-words-scene {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mo-words-scene header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.mo-words-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  min-width: 0;
+}
+
+.mo-words-tag {
+  font-size: 0.75rem;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.mo-words-tag.mine {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: transparent;
+}
+
+.mo-words-asks {
+  margin: 0;
+  padding: 6px 10px 6px 26px;
+  border-radius: 8px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 0.85rem;
+}
+
+.mo-words-scene textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 0.92rem;
+  line-height: 1.55;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.mo-words-scene.has-slots textarea {
+  border-color: var(--warn);
+}
+
+.mo-words-scene textarea:focus {
+  outline: 2px solid var(--primary-soft);
+  border-color: var(--primary);
+}
+
+.mo-words-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.mo-words-banner > span {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── the new-video dialog: where it goes, its playlist or course, the tone, the length ── */
+
+.mo-newvideo {
+  width: min(720px, 100%);
+}
+
+.mo-nv-source {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+/* two fields side by side, one under the other on a phone */
+.mo-nv-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.mo-nv-tones {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
+}
+
+.mo-nv-tone {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.mo-nv-tone:hover {
+  border-color: var(--primary);
+}
+
+.mo-nv-tone.on {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.mo-nv-message summary {
+  cursor: pointer;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.mo-nv-message pre,
+.mo-dt-pre {
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font: 0.84rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+/* ── Details: where the video sits, its status, and every YouTube and Udemy field ── */
+
+.mo-details {
+  width: min(860px, 100%);
+}
+
+/* a nested dialog (a course's details opened from a video's Details) sits above the first */
+.mo-modal-over {
+  z-index: 60;
+}
+
+.mo-dt-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mo-dt-section:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.mo-dt-h {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.mo-dt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.mo-dt-actions > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+/* the steps a video goes through, the ones done in green */
+.mo-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mo-steps li {
+  font-size: 0.8rem;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.mo-steps li.done {
+  border-color: var(--ok);
+  background: var(--ok-soft);
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.mo-dt-url {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.mo-dt-url input {
+  flex: 1;
+  min-width: 0;
+}
+
+.mo-dt-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mo-dt-tabs button {
+  font: inherit;
+  font-size: 0.9rem;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 6px 12px;
+  margin-bottom: -1px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mo-dt-tabs button.on {
+  border-bottom-color: var(--primary);
+  font-weight: 600;
+}
+
+.mo-dt-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mo-dt-label > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.mo-dt-label .label {
+  margin: 0;
+}
+
+.mo-copy {
+  flex: none;
+  padding: 2px 10px;
+}
+
+.mo-dt-field textarea,
+.mo-dt-field input[type="text"] {
+  width: 100%;
+}
+
+.mo-dt-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: -4px;
+}
+
+.mo-dt-options .mo-chip {
+  max-width: 100%;
+  white-space: normal;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.mo-dt-quiz {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mo-dt-quiz ol {
+  margin: 0;
+  padding-left: 22px;
+  font-size: 0.88rem;
+}
+
+.mo-dt-quiz li.right {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.mo-settings-note ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+/* ── the library: playlists and courses with their videos in order, and each video's tags ── */
+
+.mo-h3 {
+  font-size: 0.95rem;
+  margin: 18px 0 10px;
+}
+
+.mo-coll {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  margin-bottom: 12px;
+  min-width: 0;
+}
+
+.mo-coll-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.mo-coll-fold {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0 4px;
+  cursor: pointer;
+}
+
+.mo-coll-title {
+  flex: 1;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  overflow-wrap: anywhere;
+}
+
+.mo-coll-empty {
+  margin: 0;
+  padding: 0 12px 12px 40px;
+}
+
+.mo-eps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+
+.mo-eps > li + li {
+  border-top: 1px solid var(--border);
+}
+
+.mo-eps-section {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 8px 12px 0 44px;
+}
+
+.mo-ep {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 12px;
+}
+
+.mo-ep-num {
+  flex: none;
+  width: 24px;
+  text-align: right;
+  font-weight: 700;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.mo-ep-open {
+  flex: 1;
+  min-width: 220px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.mo-ep-open:hover .mo-card-title {
+  color: var(--primary);
+}
+
+.mo-ep-poster {
+  flex: none;
+  width: 96px;
+  aspect-ratio: 16 / 9;
+  border-radius: 4px;
+  overflow: hidden;
+  background: repeating-linear-gradient(135deg, var(--bg), var(--bg) 8px, var(--primary-soft) 8px, var(--primary-soft) 16px);
+}
+
+.mo-ep-poster img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.mo-ep-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.mo-ep-actions {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+
+.mo-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mo-tag {
+  font-size: 0.74rem;
+  line-height: 1.5;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.mo-tag.on {
+  border-color: var(--ok);
+  background: var(--ok-soft);
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.mo-tag.dim {
+  border-style: dashed;
+}
+
+.mo-card-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 2px 0;
+}
+
+/* the library's + YouTube playlist and + Udemy course, side by side */
+.mo-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mo-kits-head:has(.mo-head-actions) {
+  margin-bottom: 10px;
+}
+
+/* Details: a text box that grows with its text (one scroll for the dialog), and the two status ticks side by side */
+.mo-grow {
+  width: 100%;
+  resize: none;
+  overflow: hidden;
+  line-height: 1.5;
+}
+
+.mo-dt-checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0 16px;
+}
+
+/* a b-roll clip attached to a message: a small still of it in the chip */
+.mo-attach-clip {
+  width: 48px;
+  height: 27px;
+  object-fit: cover;
+  border-radius: 3px;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: #111;
+}

@@ -26,7 +26,9 @@ import { TextPlugin } from "gsap/TextPlugin";
 import type { Brand, Bundle, BundleScene, PropValue } from "../types";
 import { carryLayer, cameraOf, drawnBox, placeCarry, snapCarries, type CarryLayer, type CarrySnap } from "./carry";
 import { CODE_CSS, buildCode } from "./code";
-import type { Box } from "./geometry";
+import { buildPlainChrome } from "./frame";
+import { hasSurface, inkBand, type Box } from "./geometry";
+import { KIT_CSS, finishKit, kitReady, kitSync, loadKit, makeKit, newKitAssets, prepareKit, type KitAssets, type KitCtx } from "./kit";
 import {
   PAPER_CSS,
   arrowTips,
@@ -159,6 +161,10 @@ export type Diagnosis = {
   smallText: { id: string; px: number }[];
   /** SVGs that look like a chart drawn by hand (axes, bars or a data line with no words): use fx.chart */
   handChart: string[];
+  /** red pen marks (link arrows, circle loops, hand-drawn arrows) running through words or another card */
+  penOver: [string, string][];
+  /** arrows drawn by hand as a gentle curve, where a straight line (or an elbow) says it plainly */
+  curvedArrow: string[];
   words: number;
 };
 
@@ -208,6 +214,10 @@ export class Runtime {
   private carryLayers = new Map<number, CarryLayer>();
   private carryFrom = new Map<string, Box>();
   private carryHidden: HTMLElement[] = [];
+  /** the explainer kit's files for the loaded video (icons, the cast, drawings), and the media still settling
+   *  after the last seek (a b-roll clip finding its frame) */
+  private kit: KitAssets | null = null;
+  private pending: Promise<void> | null = null;
 
   constructor(stage: HTMLDivElement) {
     this.stage = stage;
@@ -229,12 +239,17 @@ export class Runtime {
     this.applyBrand(bundle);
     await this.loadFonts(bundle.brand);
     if (token !== this.loadToken) return { duration: bundle.duration, errors: [], version: bundle.version };
+    // the explainer kit fetches what the scenes use (icons, the cast, Excalidraw drawings, the sketch fonts)
+    if (!this.kit || this.kit.assetBase !== bundle.assetBase) this.kit = newKitAssets(`${bundle.themeBase}kit/`, bundle.assetBase);
+    const kitErrors = await loadKit(bundle, this.kit);
+    if (token !== this.loadToken) return { duration: bundle.duration, errors: [], version: bundle.version };
     for (const b of this.built) {
       b.tl.kill();
       b.host.remove();
     }
     this.built = [];
     this.errors = document.documentElement.dataset.mode === "render" ? [...this.fontErrors] : [];
+    this.errors.push(...kitErrors);
     this.bundle = bundle;
     this.chrome?.root.remove();
     this.chrome = null;
@@ -258,6 +273,20 @@ export class Runtime {
       });
       this.tearEdge = tearEdgeSvg();
       this.stage.appendChild(this.tearEdge);
+    } else {
+      // the other kits: the logo bottom-left and the web address bottom-right, when the kit has them and the
+      // video's settings show them (frame.ts); a kit without a logo or a url draws nothing, as before
+      const brand = bundle.brand;
+      this.chrome = buildPlainChrome(this.stage, {
+        width: bundle.width,
+        height: bundle.height,
+        aspect: bundle.aspect,
+        wordmark: brand.wordmark || brand.name,
+        iconUrl: brand.iconUrl,
+        logoUrl: brand.logoUrl,
+        url: (brand as FrameBrand).showUrl === false ? "" : brand.endCard?.url || "",
+        showLogo: (brand as FrameBrand).showLogo !== false,
+      });
     }
     bundle.scenes.forEach((scene, i) => {
       const b = this.build(bundle, scene, i > 0 ? bundle.scenes[i - 1] : null);
@@ -370,6 +399,8 @@ export class Runtime {
       Promise.all(imgs.map((img) => (img.complete ? Promise.resolve() : img.decode().catch(() => null)))),
       new Promise((r) => setTimeout(r, 8000)),
     ]);
+    // the kit's media too (b-roll clips), up to 20 s
+    await Promise.race([kitReady(this.built.map((b) => b.root)), new Promise((r) => setTimeout(r, 20000))]);
   }
 
   private resolveAssets(text: string, base: string): string {
@@ -445,7 +476,7 @@ export class Runtime {
     }
     // the markup goes inside the camera (fx.focus moves it); the page's label, the turn's shade and any
     // error box stay outside it, on the page itself
-    shadow.innerHTML = `<style>${BASE_CSS}${paper ? PAPER_CSS : ""}${CODE_CSS}</style><style>${css}</style><div class="scene-root"><div class="scene-cam">${markup}</div><div class="mo-shade"></div></div>`;
+    shadow.innerHTML = `<style>${BASE_CSS}${paper ? PAPER_CSS : ""}${CODE_CSS}${KIT_CSS}</style><style>${css}</style><div class="scene-root"><div class="scene-cam">${markup}</div><div class="mo-shade"></div></div>`;
     const root = shadow.querySelector(".scene-root") as HTMLDivElement;
     const cam = root.querySelector(".scene-cam") as HTMLDivElement;
     const shade = shadow.querySelector(".mo-shade") as HTMLDivElement;
@@ -489,6 +520,15 @@ export class Runtime {
     // the smallest text the layout report accepts (as diagnose measures it): fx.chart sizes its labels from it
     const minText = paper ? 22 : Math.round(Math.min(bundle.width, bundle.height) * 0.028);
     const fx = makeFx(tl, scene.id, sfx, { cam, width: bundle.width, height: bundle.height, content, entrance, minText });
+    // the explainer kit: its markup is drawn (icons, sketch shapes, people) before anything measures the page,
+    // and fx gains its helpers (fx.sketch, fx.array, fx.person, ...)
+    const kit: KitCtx = {
+      sceneId: scene.id, tl, root, cam, width: bundle.width, height: bundle.height, content, minText, paper, duration: scene.duration,
+      assets: this.kit ?? newKitAssets(`${bundle.themeBase}kit/`, bundle.assetBase),
+      sound: fx.sound, mark: entrance, seed: (s: string) => hashString(`${scene.id}:${s}`), errors, fx: fx as unknown as Record<string, unknown>,
+    };
+    prepareKit(kit);
+    Object.assign(fx, makeKit(kit));
 
     // the paper page's label, torn on as the voice starts (a thumbnail is a picture: no label)
     if (paper && scene.kind !== "endscreen" && !thumb && scene.label) {
@@ -523,6 +563,7 @@ export class Runtime {
         errors.push(`Scene ${scene.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    finishKit(kit); // what the kit plans from everything the script set (a person's blinks)
     try {
       fx.finish(); // the camera's moves and the code bands, in time order
     } catch (err) {
@@ -560,7 +601,7 @@ export class Runtime {
         .map((snap) => ({ snap, old: prev.root.querySelector<HTMLElement>(`[data-carry="${CSS.escape(snap.key)}"]`) }))
         .filter((p): p is { snap: CarrySnap; old: HTMLElement } => !!p.old);
       if (!pairs.length) continue;
-      const css = `${BASE_CSS}${paper ? PAPER_CSS : ""}${CODE_CSS}\n${cur.css}`;
+      const css = `${BASE_CSS}${paper ? PAPER_CSS : ""}${CODE_CSS}${KIT_CSS}\n${cur.css}`;
       this.carryLayers.set(i, carryLayer(this.stage, css, bundle.width, bundle.height, pairs));
     }
   }
@@ -605,11 +646,37 @@ export class Runtime {
     this.show(i, Math.max(0, t - this.bundle.scenes[i].start));
   }
 
+  /** What the last seek still waits for (a b-roll clip seeking to its frame), or null when the page is ready. */
+  settled(): Promise<void> | null {
+    return this.pending;
+  }
+
   seekScene(id: string, local: number) {
     const i = this.built.findIndex((b) => b.scene.id === id);
     if (i < 0) throw new Error(`No scene ${id}`);
     this.lastT = this.built[i].scene.start + local;
     this.show(i, local);
+  }
+
+  /**
+   * The page as it stands, as text, for the export: the stage's own markup (which pages show and how far
+   * their page change has got, the frame, the carried copies) and each shown page's inner markup (every
+   * inline style, attribute and word the timeline sets). Two moments with the same text draw the same
+   * pixels, so the export reuses the frame before instead of capturing it again: about two frames in three
+   * of an explainer repeat the one before. Null when something moves by itself (a running CSS animation or
+   * transition, a video, a canvas): then every frame is captured.
+   */
+  frameState(): string | null {
+    if (document.getAnimations().some((a) => a.playState === "running")) return null;
+    let state = this.stage.innerHTML;
+    for (const b of this.built) {
+      if (b.host.style.display === "none") continue;
+      const shadow = b.root.getRootNode();
+      if (!(shadow instanceof ShadowRoot)) return null;
+      if (shadow.querySelector("video, canvas")) return null;
+      state += "\u0000" + shadow.innerHTML;
+    }
+    return state;
   }
 
   /** Shows scene i at its local time; during its page change the previous scene's last frame takes part. */
@@ -635,6 +702,10 @@ export class Runtime {
     if (this.tearEdge) this.tearEdge.style.display = "none";
     if (prev) prev.tl.time(prev.scene.duration, false);
     cur.tl.time(Math.min(local, dur), false);
+    // media that runs by itself (a b-roll clip) goes to the same moment; an export frame waits for it
+    const exact = document.documentElement.dataset.mode === "render";
+    const waits = [kitSync(cur.root, Math.min(local, dur), exact), prev ? kitSync(prev.root, prev.scene.duration, exact) : null].filter(Boolean) as Promise<void>[];
+    this.pending = waits.length ? Promise.all(waits).then(() => undefined) : null;
     if (this.chrome) {
       this.chrome.setPart(cur.scene.part || "");
       this.chrome.setVisible(!(cur.scene.kind === "endscreen" && (!inTransition || local > tdur * 0.5)));
@@ -751,7 +822,7 @@ export class Runtime {
     const stageRect = this.stage.getBoundingClientRect();
     const scale = stageRect.width / W || 1;
     const minPx = paper ? 22 : Math.round(Math.min(W, H) * 0.028);
-    const out: Diagnosis = { sceneId: id, t: local, errors: [...b.errors], visible: [], offStage: [], outsideSafe: [], inZone: [], overlaps: [], crowded: [], overflow: [], smallText: [], handChart: [], words: 0 };
+    const out: Diagnosis = { sceneId: id, t: local, errors: [...b.errors], visible: [], offStage: [], outsideSafe: [], inZone: [], overlaps: [], crowded: [], overflow: [], smallText: [], handChart: [], penOver: [], curvedArrow: [], words: 0 };
     if (b.scene.kind === "endscreen") return out;
     // While the camera is zoomed in, the page is meant to reach past the frame and over the reserved
     // zones, so the placement checks skip what is inside the camera (errors and small text still count).
@@ -804,7 +875,9 @@ export class Runtime {
         // nor does a chart's frame (fx.chart): its numbers (tick labels and bar values, the p-chart's own
         // text), its axis titles and its note. Its series names, marks and legend count.
         const frame = el.classList.contains("p-chart") || (!!el.closest(".p-chart") && (el.classList.contains("p-chart-title") || el.classList.contains("p-chart-note-text")));
-        if (!el.classList.contains("p-code") && !frame) out.words += text.split(/\s+/).filter(Boolean).length;
+        // a terminal's session reads like code, and a coding visual's values, indices and pointer names
+        // (kit/ds.ts, kit/sequence.ts) are data, not words
+        if (!el.classList.contains("p-code") && !el.classList.contains("p-term") && !el.closest(".p-ds") && !frame) out.words += text.split(/\s+/).filter(Boolean).length;
         const px = (parseFloat(cs.fontSize) * (rr.width / Math.max(1, (el as HTMLElement).offsetWidth || rr.width))) / scale;
         if (px && px < minPx) out.smallText.push({ id: id2, px: Math.round(px) });
       }
@@ -825,15 +898,166 @@ export class Runtime {
         // hard shadow alone takes 10 px). Measured on the axis where they are apart, when they share the other.
         const gapX = Math.max(a.r.x, c.r.x) - Math.min(a.r.x + a.r.w, c.r.x + c.r.w);
         const gapY = Math.max(a.r.y, c.r.y) - Math.min(a.r.y + a.r.h, c.r.y + c.r.h);
-        if (placed(a.el) && placed(c.el) && Math.max(gapX, gapY) < CROWD && Math.min(gapX, gapY) < 0) out.crowded.push([a.id, c.id]);
+        // the parts of one coding visual (cells side by side, an index under its cell) sit close on purpose
+        const ds = a.el.closest(".p-ds");
+        const kin = !!ds && ds === c.el.closest(".p-ds");
+        if (!kin && placed(a.el) && placed(c.el) && Math.max(gapX, gapY) < CROWD && Math.min(gapX, gapY) < 0) out.crowded.push([a.id, c.id]);
       }
     }
     out.handChart = handCharts(b.root, stageRect, scale);
+    const pen = penMarks(b.root, stageRect, scale, W, H);
+    out.penOver = pen.over;
+    out.curvedArrow = pen.curved;
     return out;
   }
 }
 
 type Pt = { x: number; y: number };
+
+/**
+ * Red pen marks on the page (fx.link arrows, fx.circle loops, arrows drawn by hand as p-arrow paths), for the
+ * layout report:
+ *  - over: a mark that runs through words or across a card that isn't its own, as [mark, element]. Each mark
+ *    that is drawn at this moment is sampled every 6 stage px along its whole length; a sample inside a line
+ *    of words (as tall as its glyphs) or a drawn box (2 px in from its edges) counts. Reported as "the red
+ *    circle highlighting overlaps other words". What doesn't count:
+ *     - a mark's own targets: what a loop is drawn around, the two ends of a link, whatever holds the mark,
+ *       and for an arrow drawn by hand whatever its start or end touches (within 30 px);
+ *     - a box over or around one of those (a dashed group round the card a link reaches, a stacked card
+ *       behind the one it leaves), and for a loop the neighbours touching what it rings (a bar's next
+ *       segment);
+ *     - for a line drawn by hand, a card painted over it (a route line passing under its stops).
+ *  - curved: an arrow drawn by hand (one with a tip, or a hand-drawn head) as a gentle curve, where a
+ *    straight line says the same thing plainly ("why are these arrows curved?"): a first stroke with curve
+ *    commands whose ends are at least 60% of its length apart (it runs one way) and which bows off the
+ *    straight line between them by 4% to 30% of that distance. An arch or a loop that comes back round is a
+ *    deliberate gesture and doesn't count, nor does a pen line with no head (a strike-through, an
+ *    underline), nor the player's own links (they bow only to get round something).
+ */
+function penMarks(root: Element, stageRect: DOMRect, scale: number, W: number, H: number): { over: [string, string][]; curved: string[] } {
+  const over: [string, string][] = [];
+  const curved: string[] = [];
+  const shown = (el: Element) => {
+    const cs = getComputedStyle(el);
+    return cs.display !== "none" && cs.visibility !== "hidden" && effectiveOpacity(el, root) >= 0.05;
+  };
+  const toStage = (q: { left: number; top: number; width: number; height: number }): Box => ({
+    x: (q.left - stageRect.left) / scale,
+    y: (q.top - stageRect.top) / scale,
+    w: q.width / scale,
+    h: q.height / scale,
+  });
+  // what a mark may not cross: each element's lines of words, or its whole box when it is drawn (a card)
+  type Thing = { id: string; el: Element; boxes: Box[] };
+  const things: Thing[] = [];
+  const range = document.createRange();
+  for (const el of Array.from(root.querySelectorAll("[data-id]"))) {
+    if (el.closest(".p-links") || (el instanceof SVGElement && !(el instanceof SVGSVGElement))) continue;
+    const rr = el.getBoundingClientRect();
+    if (rr.width < 1 || rr.height < 1 || !shown(el)) continue;
+    const r = toStage(rr);
+    const tag = el.tagName.toLowerCase();
+    if (r.w * r.h > W * H * 0.25 || (tag === "svg" && (r.w > 200 || r.h > 200))) continue;
+    const id = el.getAttribute("data-id")!;
+    if (hasSurface(el) || ["img", "canvas", "video", "svg"].includes(tag)) {
+      things.push({ id, el, boxes: [r] });
+      continue;
+    }
+    // its own words (not those of children with their own data-id), line by line
+    const boxes: Box[] = [];
+    const walk = (n: Node) => {
+      for (const child of Array.from(n.childNodes)) {
+        if (child.nodeType === Node.TEXT_NODE && (child.textContent || "").trim()) {
+          range.selectNodeContents(child);
+          for (const q of Array.from(range.getClientRects())) {
+            if (q.width < 0.5 || q.height < 0.5) continue;
+            const [a, z] = inkBand(child, q.top, q.height); // the glyphs, not the font's whole line box
+            boxes.push(toStage({ left: q.left, top: a, width: q.width, height: z - a }));
+          }
+        } else if (child instanceof Element && !child.hasAttribute("data-id") && !["STYLE", "SCRIPT", "svg"].includes(child.tagName)) walk(child);
+      }
+    };
+    walk(el);
+    if (boxes.length) things.push({ id, el, boxes });
+  }
+  const byId = (id: string | null) => (id ? root.querySelector(`[data-id="${CSS.escape(id)}"]`) : null);
+  const related = (a: Element, b: Element) => a === b || a.contains(b) || b.contains(a);
+  for (const mark of Array.from(root.querySelectorAll<SVGPathElement>("path.p-arrow"))) {
+    if (mark.classList.contains("p-arrow-tip") || !shown(mark)) continue;
+    const cs = getComputedStyle(mark);
+    const dash = cs.strokeDasharray && cs.strokeDasharray !== "none" ? parseFloat(cs.strokeDasharray) : NaN;
+    if (Number.isFinite(dash) && dash < 1) continue; // not drawn on yet
+    let len = 0;
+    try {
+      len = mark.getTotalLength();
+    } catch {
+      continue;
+    }
+    const ctm = mark.getScreenCTM();
+    if (!(len > 2) || !ctm) continue;
+    const m = DOMMatrix.fromMatrix(ctm);
+    const at = (s: number): Pt => {
+      const p = mark.getPointAtLength(s);
+      const q = new DOMPoint(p.x, p.y).matrixTransform(m);
+      return { x: (q.x - stageRect.left) / scale, y: (q.y - stageRect.top) / scale };
+    };
+    const unit = Math.hypot(m.a, m.b) / scale || 1; // stage px per path unit
+    const steps = Math.min(600, Math.max(8, Math.ceil((len * unit) / 6)));
+    const pts = Array.from({ length: steps + 1 }, (_, k) => at((len * k) / steps));
+    const markId = mark.getAttribute("data-id") || mark.closest("[data-id]")?.getAttribute("data-id") || "arrow";
+    const fx = mark.getAttribute("data-fx");
+    const own: Element[] = [];
+    for (const key of ["data-around", "data-from", "data-to"]) {
+      const el = byId(mark.getAttribute(key));
+      if (el) own.push(el);
+    }
+    const ends = [pts[0], pts[pts.length - 1]];
+    const near = (b: Box, p: Pt, pad: number) => p.x > b.x - pad && p.x < b.x + b.w + pad && p.y > b.y - pad && p.y < b.y + b.h + pad;
+    const ownBoxes = own.map((o) => toStage(o.getBoundingClientRect()));
+    const overlap = (a: Box, b: Box, gap: number) => a.x < b.x + b.w + gap && b.x < a.x + a.w + gap && a.y < b.y + b.h + gap && b.y < a.y + a.h + gap;
+    const holder = mark.ownerSVGElement && !(mark.ownerSVGElement.parentNode instanceof SVGElement) ? mark.ownerSVGElement : mark.closest("svg");
+    const z = (e: Element) => parseInt(getComputedStyle(e).zIndex, 10) || 0;
+    for (const t of things) {
+      if (t.el.contains(mark) || own.some((o) => related(o, t.el))) continue;
+      if (!fx && t.boxes.some((b) => ends.some((p) => near(b, p, 30)))) continue; // what a hand-drawn arrow points from or to
+      // the group a mark's own element belongs to, and for a loop the strip it sits in
+      if (t.boxes.some((b) => ownBoxes.some((o) => overlap(o, b, fx === "circle" ? 3 : -1)))) continue;
+      // a line drawn by hand under a card: the card is painted over it (later on the page, not lower)
+      if (!fx && holder && hasSurface(t.el) && holder.compareDocumentPosition(t.el) & Node.DOCUMENT_POSITION_FOLLOWING && z(t.el) >= z(holder)) continue;
+      if (pts.some((p) => t.boxes.some((b) => near(b, p, -2)))) over.push([markId, t.id]);
+    }
+    // a gentle curve drawn by hand, in its first stroke (a hand-drawn head is a second one)
+    const d = mark.getAttribute("d") || "";
+    const first = d.match(/^\s*[Mm][^Mm]*/)?.[0] ?? "";
+    const arrow = mark.classList.contains("head") || (d.match(/[Mm]/g) || []).length > 1; // a tip, or a head drawn by hand
+    if (!fx && arrow && /[CcQqSsTtAa]/.test(first)) {
+      const probe = mark.cloneNode(false) as SVGPathElement;
+      probe.setAttribute("d", first);
+      probe.removeAttribute("data-id");
+      mark.parentNode?.appendChild(probe);
+      try {
+        const l = probe.getTotalLength();
+        const a = probe.getPointAtLength(0);
+        const z = probe.getPointAtLength(l);
+        const chord = Math.hypot(z.x - a.x, z.y - a.y);
+        if (l > 0 && chord >= 0.6 * l) {
+          let dev = 0;
+          for (let k = 1; k < 24; k++) {
+            const p = probe.getPointAtLength((l * k) / 24);
+            dev = Math.max(dev, Math.abs((z.x - a.x) * (a.y - p.y) - (a.x - p.x) * (z.y - a.y)) / (chord || 1));
+          }
+          if (dev > 0.04 * chord && dev <= 0.3 * chord) curved.push(markId);
+        }
+      } catch {
+        /* no geometry */
+      } finally {
+        probe.remove();
+      }
+    }
+  }
+  const seen = new Set<string>();
+  return { over: over.filter(([a, b]) => !seen.has(`${a}|${b}`) && !!seen.add(`${a}|${b}`)), curved: [...new Set(curved)] };
+}
 
 /**
  * Charts drawn by hand, for the layout report's hint "hand-drawn chart: use fx.chart" (Claude used to draw
@@ -851,7 +1075,8 @@ type Pt = { x: number; y: number };
 function handCharts(root: Element, stageRect: DOMRect, scale: number): string[] {
   const out: string[] = [];
   for (const svg of Array.from(root.querySelectorAll("svg"))) {
-    if (svg.parentElement?.closest("svg") || svg.closest(".p-chart") || svg.classList.contains("p-links")) continue;
+    // the kit's own drawings (data-kit: sketch strokes, an imported Excalidraw drawing) are not charts drawn by hand
+    if (svg.parentElement?.closest("svg") || svg.closest(".p-chart") || svg.classList.contains("p-links") || svg.closest("[data-kit]") || svg.closest(".p-ds")) continue;
     const rr = svg.getBoundingClientRect();
     if (rr.width / scale < 200 || rr.height / scale < 120 || effectiveOpacity(svg, root) < 0.05) continue;
     if (Array.from(svg.querySelectorAll("text, foreignObject")).some((t) => (t.textContent || "").trim())) continue;
@@ -1058,7 +1283,8 @@ function ownText(el: Element): string {
   const walk = (n: Node) => {
     for (const child of Array.from(n.childNodes)) {
       if (child.nodeType === Node.TEXT_NODE) s += child.textContent ?? "";
-      else if (child instanceof Element && !child.hasAttribute("data-id") && !["STYLE", "SCRIPT"].includes(child.tagName)) {
+      // the words of the user's own Excalidraw drawing (data-kit-uncounted) are its own layout: not counted
+      else if (child instanceof Element && !child.hasAttribute("data-id") && !child.hasAttribute("data-kit-uncounted") && !["STYLE", "SCRIPT"].includes(child.tagName)) {
         // split words (SplitText) and line breaks are separate elements: keep a space between them
         const inline = ["SPAN", "B", "I", "EM", "STRONG", "CODE", "SMALL", "SUP", "SUB", "MARK"].includes(child.tagName);
         if (!inline) s += " ";

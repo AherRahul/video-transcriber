@@ -14,12 +14,31 @@ ask_style shows the cards and tells Claude to end its turn; the user's pick come
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
+import tempfile
 import time
 from pathlib import Path
 
 from .prompts import CLAUDE_CODE_NOTE, SYSTEM_PROMPT, TOOL_LABELS, TOOLS
 from .store import StoreError
+
+
+def system_prompt_file() -> str:
+    """The system prompt as a file, for the CLI's --system-prompt-file. It no longer fits on the command
+    line: Windows caps a whole command line at 32,767 characters and the prompt alone is over 31,000. Past
+    the cap the CLI can't even start, and Windows' "the filename or extension is too long" reaches the SDK
+    as a FileNotFoundError, reported as "Claude Code not found at ...\\claude.exe" though the file is there.
+    The file is named by its content, so turns running at once share it and a changed prompt gets a new one;
+    it is written again whenever the temp folder has been cleared."""
+    data = (SYSTEM_PROMPT + CLAUDE_CODE_NOTE).encode("utf-8")
+    path = Path(tempfile.gettempdir()) / "motion" / f"system-prompt-{hashlib.sha256(data).hexdigest()[:16]}.md"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_bytes(data)  # bytes: the text exactly, no newline translation
+        os.replace(tmp, path)
+    return str(path)
 
 BUILTIN_TOOLS = ["WebSearch", "WebFetch", "TodoWrite"]
 
@@ -140,7 +159,7 @@ class ClaudeCodeTurn:
         names = [f"mcp__motion__{t['name']}" for t in TOOLS]
         stderr_tail: list[str] = []
         options = ClaudeAgentOptions(
-            system_prompt=SYSTEM_PROMPT + CLAUDE_CODE_NOTE,
+            system_prompt={"type": "file", "path": system_prompt_file()},  # too long for a Windows command line
             mcp_servers={"motion": server},
             strict_mcp_config=True,
             tools=list(BUILTIN_TOOLS),

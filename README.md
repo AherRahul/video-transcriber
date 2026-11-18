@@ -8,7 +8,7 @@ AI service, and there is no account, API key or cost per video.
 
 It also has **Motion** ([section 6](#6-motion-animated-videos-made-by-claude)): describe a short animated
 video and Claude writes it as code, which plays live next to the chat and exports to MP4, from short clips
-to narrated 10 to 30 minute explainers in the AlgoInsight daily-film look. Motion is the one part that uses
+to narrated explainers in the AlgoInsight daily-film look, as long as each topic needs. Motion is the one part that uses
 outside AI services: Claude (through Claude Code with your Claude login, or an API key) and ElevenLabs for
 the narration voice.
 
@@ -313,10 +313,10 @@ its time and the line being said. Click one to see it large (left and right step
 **In Motion.** **Make a Motion video** takes the screenshots along (wait until they are done): they become
 the video's assets `ref-<mm>m<ss>s.jpg`, with `docs\REFERENCES.md` (time, asset, what is said). The project
 state tells Claude they exist, and its `view_references` tool shows it the screenshots for a stretch of the
-source (6 by default, up to 12), each with its time and words. Claude looks at them before designing the
-scenes that cover that part, to see what the source shows at each point and how much it puts on one screen,
-then designs its own page in the paper look. It never copies their layout, words, brand, logos, characters,
-numbers or images, and they are never shown in the video (a scene that uses one gets a warning).
+reference (6 by default, up to 12), each with its time and words. They are research, like the transcript: they
+show how that video put an idea on screen, and Claude then designs its own page in the paper look. It never
+copies their layout, words, brand, logos, characters, numbers or images, and they are never shown in the video
+(a scene that uses one gets a warning).
 
 ---
 
@@ -326,11 +326,13 @@ Open the **Motion** tab at the top of the page. Motion makes two kinds of video:
 
 - **Short clips** (a 6-second logo sting, a 30-second reel, an animated chart): describe it in one sentence,
   pick a look from the cards Claude shows, and watch the scenes appear.
-- **Narrated explainers of 10 to 30 minutes in the AlgoInsight daily-film look**: graph paper, the logo card,
-  torn labels, sticky notes, stamps, red pen, page tears and turns, the end screen, read by the YouTube
-  voice (Pooja on ElevenLabs Eleven v4). Attach a competitor's transcript and Motion makes **its own
-  version**: every point the transcript teaches, in its own story, examples and words, at about the same
-  length (never under 10 or over 30 minutes).
+- **Narrated explainers in the AlgoInsight daily-film look**: graph paper, the logo card, torn labels, sticky
+  notes, stamps, red pen, page tears and turns, the end screen, read by the YouTube voice (Pooja on ElevenLabs
+  Eleven v4). The outline comes from **you**: your take, your stories, your real numbers and runs, and
+  AlgoInsight's own lessons and code. Another creator's video (its transcript or screenshots) is **research
+  only**, never the outline, the order, the examples or the length. Each video gets a **shape and length that
+  fit its topic** (a story, a problem worked to its fix, a build-along, a comparison, a quick take, ...), and the
+  script is **in your own words** before any scene is built.
 
 Claude writes every scene as code (HTML, CSS and a GSAP animation), checks its own work (a layout report
 for every scene at every cue: text off the frame or in the logo, label, title or narrator zones,
@@ -366,49 +368,103 @@ run programs or record screens (where a real recording belongs it leaves a marke
 
 ### A narrated explainer, step by step
 
-1. **Start** with the *AlgoInsight daily (narrated)* starter, or **Make a Motion video** under a finished
-   transcript (it opens in the paper look with the transcript attached). A timed transcript sets the
-   **target**: its own length, held to 10 to 30 minutes. Its timed lines become the **points to cover**.
-2. Claude **checks the facts** (web search when it runs on Claude Code) and writes them to FACTS.md, plans
-   the **storyboard** in parts with one running story, writes the **script** for every scene (three passes,
-   simple English, the voice rules: no digits, dashes, brackets, symbols or SSML), and sets the
-   **pronunciations** for every short form (AI said A-I, LLM said L-L-M, ...). Each scene names the source
-   times it teaches.
-3. **The script check.** No scene code is written until the script passes three checks:
-   - **Length:** the video runs 90 to 150 percent of the target.
-   - **Coverage:** every timed line of the source is taught by some scene, or skipped with a reason (a
-     greeting, an ad, a plug for their channel).
-   - **Own words:** no run of eight or more of the source's words in a row.
-4. **Script** in the top bar shows the whole narration with its parts, labels, timings, cue marks and source
-   times, the **Chapters** (one per part), the **Source coverage** and Claude's documents (FACTS.md,
-   YOUTUBE.md with titles, description, tags and the thumbnail idea). Download or copy any of them.
-5. Claude writes **every** scene, pinning every element to a `<cue/>` in the narration, then audits them. If
+1. **Start** with **Make a Motion video** under a finished transcript, **+ New video**, or the *AlgoInsight
+   daily (narrated)* starter. Each opens the **New video** dialog, where everything is chosen before the video
+   exists: **Made for** YouTube or Udemy, the **playlist or course** (or a new one) and the **episode**
+   (lecture) number, the Udemy **section**, the **script tone**, the **length** (empty lets the topic decide),
+   **Wait for my words**, and **your notes** (your take, a story, your numbers). The first message for Claude
+   is written from these choices (open *The first message Claude gets* to read it) and lands in the chat
+   box, where you can still change it before sending. A transcript comes along as a **reference**: research
+   for the topic, what viewers ask and what it gets wrong, never the outline or the length.
+2. **Claude asks you first** for what your notes leave out: your take on the topic, a real story (an
+   interview, a bug, a learner's question), your real numbers or runs, and which AlgoInsight lessons and
+   problems to use. It proposes the **shape** and **length** this topic needs, each with why. It sees the
+   shapes of your other videos, so the channel doesn't repeat itself, and the episodes either side of this
+   one in its playlist or course, so it builds on them instead of teaching them again. A length you set is
+   the only one enforced. The **script tone**: **Normal** (simple, warm English with a little character),
+   **Funny** (the same ideas with light, kind humour), **Focused** (knowledge-heavy and precise, still simple
+   English) or **Informational** (research papers and technical sources decoded in simple English, in a calm
+   tone; the *Research paper, decoded* starter sets it). Change it later from the top bar's **Tone** and a
+   note reminds you to ask Claude to rewrite the script in the new tone.
+3. Claude **checks the facts** (web search when it runs on Claude Code) and writes them to FACTS.md, plans
+   the **storyboard** in parts, and drafts the **script** for every scene (simple English, the voice rules:
+   no digits, dashes, brackets, symbols or SSML). Where only you can say it, it leaves a place for your
+   words, like `[[you: the interview where this went wrong, two or three sentences]]`, instead of making
+   it up. No run of eight or more of the reference's words in a row is allowed.
+4. **Your words.** A banner says the draft is ready. **Script > Your words** shows it scene by scene: rewrite
+   each scene the way you would say it, fill every `[[you: ...]]` place (each shows what it asks for), keep
+   the `<cue/>` marks, then **Approve and build the scenes**. No scene code is written until you approve,
+   the voice refuses a scene with an open place, and a scene you rewrote is marked **Your words**: Claude
+   changes it only when you ask. (**Video settings > Wait for my words before the scenes** turns this off
+   for a video.)
+5. **Script** in the top bar also shows the whole narration with its parts, labels, timings and cue marks,
+   the **Chapters** (one per part) and Claude's documents (FACTS.md with sources, notes). Download or copy
+   any of them.
+6. Claude writes **every** scene, pinning every element to a `<cue/>` in the narration, then audits them. If
    it stops part-way, Motion sends it back to the remaining scenes. If it stops again without progress
    (or a turn hits an error), **Continue building** in the chat picks up where it left off.
-6. **Voice** in the top bar, then **Generate voice**. Each scene's narration goes to ElevenLabs with the time
+7. **Voice** in the top bar, then **Generate voice**. Each scene's narration goes to ElevenLabs with the time
    of every character; scenes whose words didn't change reuse their audio for free. Every cue then moves to
    its spoken word, so the whole video re-times by itself. Edit the **pronunciation table** there too. Then
    ask Claude to audit again: the real voice runs faster than the estimate, and the timing checks show
    what now lands late.
-7. Claude designs the **thumbnail** at the hand-off (see below).
-8. **Export** at 1080p or 4K with the narration, the paper sounds (rip, page, stamp, pop, pencil, crumple)
-   and an optional music bed mixed in. The captions are written next to the MP4.
+8. At the hand-off Claude writes the **publishing details** (see *Playlists, courses and Details* below) and
+   designs the **thumbnail**.
+9. **Export** in 4K with the narration, the paper sounds (rip, page, stamp, pop, pencil, crumple) and an
+   optional music bed mixed in. The captions are written next to the MP4. Downloading the MP4 from the page
+   marks the video **Downloaded**; tick **Uploaded** (or paste its link) in **Details** once it is up.
 
 ### Making and changing a video
 
 | What | How |
 |------|-----|
-| **Start** | **+ New video**, or a starter. Under a finished transcript, **Make a Motion video**. |
-| **Attach material** | The paperclip, drag and drop, or paste: images, PDFs, text files, audio. A transcript with timestamps sets the target length and the points to cover. |
+| **Start** | **+ New video**, a narrated starter, or **Make a Motion video** under a finished transcript: the **New video** dialog (destination, playlist or course and episode, tone, length, your notes). The short starters (reel, sting, chart) start at once. |
+| **Arrange** | The library groups the videos by playlist and course, in episode order (a course by section), with **↑ ↓** to reorder; the rest are under *In no playlist or course*. **+ YouTube playlist**, **+ Udemy course**, **Rename** and **Delete** (the videos stay) are there too. Move a video to another playlist or episode in its **Details**. |
+| **Tags** | Each video shows how far it has got (Script, Scenes built, Voiced) until it is exported, then **Exported**, **Downloaded**, **Uploaded** (a link when you saved one) and whether its **Details** are written. |
+| **Details** | The top bar's **Details** (or **Details** on a video in the library): where it sits, its status, and every YouTube or Udemy field with a copy button. See below. |
+| **Attach material** | The paperclip, drag and drop, or paste: images, PDFs, text files, audio. Your own material (lessons, code, real run output) shapes the video; a transcript with timestamps is a reference, research only. |
 | **Pick the look** | Click a style card, or **Other / my brand** and describe it. Paper videos skip this. |
 | **Change something** | Say it in the chat ("the estimate is thirty minutes", "make part two shorter"). Claude patches only what you asked for. |
 | **Point at it** | **Comment**, then click an element in the preview and write what should change. |
+| **Pick the tone** | In the **New video** dialog, and later the top bar's **Tone** (or **Video settings > Script tone**): Normal, Funny, Focused or Informational. Claude writes the draft in it. |
+| **Put it in your words** | **Script > Your words**: every scene's narration, editable in place, with the places Claude left for your stories, opinions and numbers. **Approve and build the scenes** when it's yours. |
 | **Edit it yourself** | The panel under the preview: a scene's narration, torn label, part, hold, transition, and its props (text, numbers, colours, images). **Code** shows the scene's source. A changed narration needs its voice again. |
 | **Undo** | Undoes Claude's last turn or your last edit, one step at a time. |
 | **Commands** | Type `/export`, `/undo`, `/clear` (a new chat that keeps the scenes) or `/new`. |
 | **Play** | Space plays and pauses (with the narration and sounds once the voice exists); left and right step one frame (Shift: one second); up and down move between scenes. **Guides** shows the safe area, **Sound** mutes the preview. |
 | **Find a scene** | The scene strip under the preview: every scene with its number, name, length and voice dot, grouped by part; the promo and the end screen are marked. The arrows in the scene panel step through scenes too. |
 | **YouTube or Udemy** | The **For YouTube / For Udemy** button in the top bar. YouTube: choose the logo card, the web address, the AlgoInsight promo and the end screen. Udemy: none of them (a Udemy film shows no website, URL, price or platform of ours), and Claude is told to leave AlgoInsight out of the narration. The target length lives there too. |
+
+### Playlists, courses and Details
+
+A **YouTube playlist** or a **Udemy course** holds videos in order. A video's place is its episode (or
+lecture) number and, in a course, its section; putting it into a course makes it a Udemy video (no logo
+card, web address, promo or end screen, and no AlgoInsight in it), into a playlist a YouTube one. Claude
+sees the place in every message: which episode this is, which come before and after, and the whole list,
+so each one builds on the last.
+
+**Details** is the one place for everything the upload asks for. Claude writes it at the hand-off with
+`write_details` (or press **Ask Claude to write them**), in the format a top educational creator works from;
+you edit any field, and each has a **Copy** button:
+
+- **YouTube**: 3 to 5 title options (45 to 70 characters, the search phrase first) and the one picked; the
+  **description as pasted**, assembled from the hook (the first 150 characters, all that search shows), two
+  short paragraphs, 3 to 6 key points, the chapters (from the parts), real links, a call to action pointing
+  to the next episode, and 2 or 3 hashtags; 8 to 15 tags (under 500 characters); a pinned comment that asks
+  viewers a question; what the end screen points to; the main keyword; who it is for.
+- **Udemy**: the lecture title (80 characters), the lecture description with what the learner will be able
+  to do (2 to 4 objectives that start with a verb you can check), key terms, resources, a 2 or 3 question
+  quiz (four options, the right one marked, and why), and whether it suits the free preview. Nothing about
+  AlgoInsight, our website, prices or the platform.
+- **The playlist or course itself**: **Playlist details** (title, description) or **Course details** (title
+  60, subtitle 120, a description of 200 words or more, at least 4 objectives, requirements, who it is for,
+  level), from the library or a video's Details. Claude writes it with the first video's details when it
+  has none.
+
+Details also shows the video's **status** (script, scenes, voice, export, downloaded, uploaded) with the
+**Downloaded** tick (set by itself when the MP4 is downloaded from the page) and **Uploaded** with the
+video's link. **DETAILS.md** downloads every field in one file, and the publishing kit zip includes it. A
+video from before Details shows its old YOUTUBE.md there.
 
 ### The paper look
 
@@ -420,12 +476,14 @@ video ends on the paper end screen with Watch next, More from the series and Sub
 components (cards, sticky notes, marker headings, pen notes and arrows, ink stamps, badges, recording
 windows) and the entrances (pop, unfold, tear on, write on, marker wipe, draw, stamp slam, crumple) with
 the films' timings. Arrowheads are drawn by the player on the line's real end, and the layout check also
-reports blocks of words closer than 18 px.
+reports blocks of words closer than 18 px, red pen marks (arrows, loops) that run over words or another
+card, and arrows drawn by hand as a curve.
 
 **Animation tools** for explaining, not just revealing: a **camera** that zooms and pans to the part being
 explained and back (`fx.focus`, `fx.unfocus`); the **flow kit**: packets travelling along a path for
-requests and data on the move (`fx.flow`), any element moved along a path (`fx.travel`), a red-pen arrow
-drawn between two elements (`fx.link`), a pen ring around one (`fx.circle`), a bar or queue filling
+requests and data on the move (`fx.flow`), any element moved along a path (`fx.travel`), a straight red-pen
+arrow between two elements (`fx.link`: it bows only to get round something in its way, and a request and
+its reply run side by side), a pen loop that hugs one (`fx.circle`), a bar or queue filling
 (`fx.grow`) and text that changes with a small pop (`fx.change`); **code walkthroughs**: one code panel,
 highlighted with line numbers, typed on line by line (`fx.code`) with a marker band moving to the lines the
 voice explains (`fx.line`). Code on screen is always copied from your files or a real run, never written up
@@ -451,6 +509,88 @@ live in `backend\motion\seed\promo`; a video gets its own copy when the promo is
 voiced like any scene, and every voice clip is also kept in `motion-data\voice-cache`, so the same words
 are never paid for twice: the promo's minute costs nothing after the first video.
 
+### The explainer kit (system design, AI, coding)
+
+Building blocks for tech explainers that every scene can use, in the paper look or any brand kit. They are parts,
+never page templates: Claude still lays out each page for its own content.
+
+- **Icons and logos.**
+  - The 1,539 Lucide line icons: `data-icon="database"` on any element draws one in ink, at any size
+    (`--icon-size`), and `fx.drawIcon` draws it on like a pen.
+  - The films' logo library: AWS and Azure architecture icons and brand marks for Docker, Kafka, Redis,
+    Postgres, Kubernetes, GitHub and others. Use `data-logo="aws/s3"`; each group's terms are in
+    `kit/logos/SOURCES.md`.
+  - Claude's `find_icons` searches both in plain words ("message queue" finds SQS, Kafka and RabbitMQ). A
+    scene naming an icon or logo the kit doesn't have is told so when it is written.
+- **The Excalidraw sketch look.** Hand-drawn boxes, circles, ellipses and diamonds (`s-box`, `s-circle`,
+  `s-ellipse`, `s-diamond`), using the Excalidraw palette and fills and the Virgil and Excalifont handwriting
+  fonts. `fx.sketchIn` draws a shape on: outline, then fill, then words. `fx.sketchLink` draws a hand-drawn
+  arrow that packets can travel along, and `fx.sketchCircle` rings a shape. The diagrams are sketched; the
+  page around them keeps the paper look.
+- **Your own Excalidraw drawings.** Attach a `.excalidraw` file to a video and Claude places it with
+  `<div class="x-draw" data-src="asset://name.excalidraw">`. It is drawn as Excalidraw draws it (shapes,
+  arrows, freehand, text, images, frames). `fx.drawIn` draws it in element by element, and `fx.drawPart`
+  draws one part, picked by its words or its id, on the cue that names it. Claude reads what is in a
+  drawing with `read_drawing`.
+- **Coding visuals.** Each builds in a box the scene places, clean ink by default or sketched (`sketch: true`):
+  - `fx.array`: pointers like i, j, lo and hi, marks, ranges, swaps and a sliding window;
+  - `fx.list`, `fx.stack`, `fx.queue` and `fx.hashmap` (buckets with chaining);
+  - `fx.tree`, built from a LeetCode-style list: visits, paths, edits;
+  - `fx.graph`: BFS and DFS frontiers, weights;
+  - `fx.grid`: DP tables that fill cell by cell;
+  - `fx.callstack`: frames for recursion.
+- **Sequence diagrams.** `fx.sequence` takes actors (with icons) and messages (calls, replies, async calls,
+  self-calls) and draws each message in on its cue, with lifelines and activation bars.
+- **Terminal and diff.** A `p-term` window types a real command with `fx.term` and shows its real output. A
+  code panel with `data-lang="diff"` (or `data-diff`) marks added lines green and removed lines red. As
+  everywhere, code and output are copied from real files and runs, never written for the video.
+- **People.** Our own cartoon cast, drawn in code by the player's rig (`kit/toon.ts`): one slim figure in an
+  open jacket, tee, jeans and sneakers for everyone, bright skin, thick outlines and big expressive eyes. Only
+  the hair, accessories and colours differ (each person's spec is in `kit/cast/cast.json`).
+  - The cast: Meera (backend engineer), Kavya (student), Kabir (startup developer), Ishaan (fresher), Arjun
+    (senior engineer and interviewer) and Priya (product manager).
+  - Markup: `<div class="p-person" data-person="meera" data-pose="point" data-face="talk">`. They can be
+    shown full length, as a framed bust (`data-crop="bust"`) or as a round avatar (`data-crop="head"`), and
+    turned to face left (`data-flip`).
+  - 8 poses: rest, wave, point, explain, think, shrug, hips and phone. The arms are joints, so `fx.pose`
+    swings them to the new pose. There are 8 faces (smile, talk, happy, surprised, worried, thinking,
+    confident, sad), changed with `fx.face`. `fx.nod` nods, `fx.talk` moves the mouth while a character
+    speaks, and they blink by themselves.
+  - Scenes written for the earlier cast keep working: its face and pose names ("Calm", "Explaining",
+    "ease") map onto these.
+  - `p-say` is a speech bubble.
+  - The same person keeps the same role in every video.
+
+The kit's files are in `frontend\public\assets\motion\kit` (icons, logos, fonts, cast), each folder with its
+SOURCES.md. `frontend\scripts\build-kit-icons.mjs` rebuilds the icons and logos (its header says how).
+
+### B-roll
+
+Short real clips or photos under the narration, where an idea meets everyday life (a queue at a shop counter,
+a server room). Two sources:
+
+- **Your own clips:** attach a video (.mp4, .mov, .webm, .mkv, up to 1 GB) with the paperclip or by dropping
+  it on the chat. It is converted in the background (the chip says converting; a note says when it's ready):
+  H.264, silent, at most 4K, a keyframe every 10 frames so the export lands on the exact frame. The original
+  isn't kept: it stays where it came from.
+- **Free stock (Pexels and Pixabay):** Claude searches with `find_broll`, looks at the candidates' pictures and
+  imports one with `import_broll` (the best file up to 4K, trimmed to the part it needs). Both licences are free
+  to use with no credit needed; every import still writes its credit to `CREDITS.md` (under Script > Documents).
+  It needs your free keys in `backend\.env`:
+
+  ```
+  MOTION_PEXELS_KEY=your-pexels-key      # https://www.pexels.com/api/ (sign up, then "Your API key")
+  MOTION_PIXABAY_KEY=your-pixabay-key    # https://pixabay.com/api/docs/ (sign up; the key is shown on that page)
+  ```
+
+  Restart the app after adding them. Without keys the stock search says how to get them; your own clips work
+  without any.
+
+In a scene a clip is `<video class="p-broll" data-src="asset://name.mp4">` (class `full` for a full-bleed shot
+under the paper frame, or inside a `p-polaroid` or `p-window`), run with `fx.broll(el, at, {from, speed, until})`;
+`fx.kenburns` pans and zooms slowly. Clips are always silent, and b-roll only illustrates: it is never presented
+as a real demo, a measurement or our own data.
+
 ### Brand kits
 
 A brand kit holds the colours by role, the fonts (Google Fonts or system fonts; Motion keeps a copy of each
@@ -461,11 +601,14 @@ with the indigo-to-purple gradient) and **AlgoInsight Paper** (the daily-film lo
 
 ### Exporting
 
-**Export**, then 1080p, 4K or 720p. The panel shows what goes in: the **narration** (included on its own
-once the voice exists; it says how many scenes are voiced), the **paper sounds**, and optional **music under
-the voice** (Motion has no built-in music: **Upload...** an MP3 or WAV you have the rights to). Every frame
-is captured in the background browser and each scene is encoded to H.264 at 30 fps, then joined; the
-narration, the sounds and any music are mixed last.
+**Export** makes a 4K MP4 (3840 x 2160, H.264 at 30 fps). The panel shows what goes in: the **narration**
+(included on its own once the voice exists; it says how many scenes are voiced), the **paper sounds**, and
+optional **music under the voice** (Motion has no built-in music: **Upload...** an MP3 or WAV you have the
+rights to). Every frame is captured in the background browser, drawn at the full 4K size; a frame that is
+the same as the one before (a page held while the voice talks) is captured once and repeated. Each scene is
+encoded on the laptop's GPU (Intel Quick Sync) when FFmpeg has it, otherwise with x264, while the next scene
+is being captured; the scenes are then joined and the narration, the sounds and any music mixed last. The
+export result says which encoder ran and how many frames were captured.
 
 **The audio finish.** The music is **ducked** under the voice: a sidechain compressor keyed by the
 narration pulls it about 10 dB down while the voice talks and lets it back up in the pauses and page
@@ -481,9 +624,8 @@ appears when the voice says it (scenes without their voice yet use the estimate)
 lines of 42 characters and stays up 1 to 7 seconds, broken at the end of a sentence first, then at a comma.
 The current captions are also at `/api/motion/projects/<id>/captions.srt` and `captions.vtt`. Unchanged
 scenes are reused from the last export, so after a small edit only that scene (and the one that tears or
-turns from it) is rendered again. Measured on this laptop: 32 seconds of paper video at 1080p took 81 seconds
-the first time, so a 30-minute film takes roughly 40 to 50 minutes (4K about twice that). Files are under
-`motion-data\projects\<id>\renders\` and the Download button.
+turns from it) is rendered again. Files are under `motion-data\projects\<id>\renders\` and the Download
+button.
 
 ### Models and cost
 
@@ -496,7 +638,7 @@ characters; the Voice menu says how many characters a Generate will send.
 
 Everything is in the `motion-data` folder next to `backend` (ignored by Git): one folder per video with
 `project.json`, one HTML file per scene, the thumbnail (`thumbnail.html`), uploads, the timed source
-(`source.json`), the voice clips, documents, the chat, undo snapshots and exports with their captions. Set
+(`source.json`, a reference), the voice clips, documents, the chat, undo snapshots and exports with their captions. Set
 `MOTION_DATA_DIR` to keep it elsewhere.
 
 ---
@@ -584,22 +726,33 @@ The terminal running the server shows the full error for anything the page repor
 
 ## 11. For developers
 
-### Run the page in development mode (live reload)
+### Development mode: hot reload for the server and the page
 
-Terminal 1 (the server):
+Terminal 1 (the server, with hot reload, like nodemon):
 
 ```powershell
-.\backend\run.ps1
+.\backend\run.ps1 -Dev
 ```
 
-Terminal 2 (the page):
+It runs the server and watches the backend's Python files (`backend\**\*.py`, tests and `.venv` left out). When one changes, it restarts the server and prints which file it was:
+
+- **It waits for running work.** A change made while an export, a voice job, a Claude turn or a transcription is running (it asks `GET /api/busy`) waits for that work to finish. It says once what it is waiting for, then restarts.
+- **Nothing is left running.** A restart stops the server's whole process tree, the export's headless browser and FFmpeg included.
+- **A crash waits too.** If the server stops on an error (a typo in the file you just saved), it says so and waits for your next save.
+- Type `rs` and Enter to restart at once. Ctrl+C stops it all.
+
+`uvicorn --reload` is not used because on Windows it leaves the export's browser running and cuts an export short without a word.
+
+Terminal 2 (the page, with live reload):
 
 ```powershell
 cd frontend
 npm run dev
 ```
 
-Open http://localhost:5180. Calls to `/api` are passed to the server on port 8765.
+Open http://localhost:5180. A change to the page's code shows at once, without a reload. Calls to `/api` are passed to the server on port 8765. The page at http://127.0.0.1:8765 (and Motion's exports) use the *built* page, so run `npm run build` when you are done.
+
+To run a second copy beside the usual one (a test copy, say), set its port: `$env:TRANSCRIBER_PORT = "8799"; .\backend\run.ps1`.
 
 ### Tests and checks
 
@@ -617,13 +770,14 @@ npx tsc -b                                          # type-check the page
 | Call | What it does |
 |------|--------------|
 | `GET /api/health` | `{ ok, ffmpeg, models, defaultModel }` |
+| `GET /api/busy` | Work a restart would cut short: `{ busy, transcriptions, exports, voice, claude }` (counts). The dev runner waits for it. |
 | `POST /api/jobs` with body `{ "url": "...", "language": "en", "model": "small", "forceWhisper": false, "screenshots": true }` | Starts a transcription and returns `{ "id": "..." }`. Only `url` is required. |
 | `GET /api/jobs/{id}` | `state` (`queued` / `running` / `done` / `error`), `stage`, `percent`, `message`, `transcript` when done, and `frames` (how the screenshots are going) |
 | `GET /api/jobs/{id}/download?format=txt\|srt\|vtt&timestamps=true\|false` | The transcript as a file |
 | `GET /api/jobs/{id}/frames` | The screenshots: `{ state, percent, message, items: [{ t, url, file, text }] }`. `state` is `off`, `waiting`, `running`, `done` or `none` (then `message` says why). Answered from disk after a restart. |
 | `GET /api/jobs/{id}/frames/{file}` | One screenshot (JPEG) |
 | `GET /api/jobs/{id}/frames.zip` | Every screenshot with `REFERENCES.md` and `references.json` |
-| `/api/motion/...` | Motion: projects, scenes, undo, assets, chat (with long-polled live updates), export, brand kits. The list is at the top of `backend/motion/api.py`. |
+| `/api/motion/...` | Motion: projects, scenes, undo, assets, chat (with long-polled live updates), export, brand kits, playlists and courses (`/collections`) and each video's publishing details (`/projects/<id>/details`). The list is at the top of `backend/motion/api.py`. |
 
 Example:
 
@@ -640,6 +794,7 @@ Invoke-RestMethod "http://127.0.0.1:8765/api/jobs/$($job.id)"
 | `backend/transcriber.py` | `transcribe_url()` runs the whole flow: `fetch_info` → `fetch_captions` (picks the track, reads json3 / VTT / SRT, follows HLS caption playlists, removes rolling repeats) → `download_audio` → `decode_audio` (FFmpeg) → `run_whisper`. Also friendly error messages and the `to_txt` / `to_srt` / `to_vtt` formats. |
 | `backend/screenshots.py` | The screenshots: `download_video` (720p video only), `scene_changes` and `pick_moments` (scene cuts plus the 15 s grid), `extract_frame`, `text_around` (what is said then), `take_screenshots` (all of that on a local file), the job folder, the zip and the 14-day clean-up. |
 | `backend/app.py` | FastAPI: the job queue (one worker thread, jobs in memory, at most 50 kept), the endpoints, and serving `frontend/dist`. |
+| `backend/dev.py` | Hot reload for development (`run.ps1 -Dev`): restarts the server when a backend `.py` file changes, after any running work (`/api/busy`). |
 | `backend/test_transcriber.py` | Offline unit tests (the screenshots run on a test video FFmpeg makes). |
 | `frontend/src/App.tsx` | The page: form, options, progress, transcript, search, copy and download, and the video prompt under a transcript. |
 | `frontend/src/api.ts` | Calls to the server. |
@@ -651,10 +806,16 @@ Invoke-RestMethod "http://127.0.0.1:8765/api/jobs/$($job.id)"
 | `frontend/src/styles.css` | Light and dark theme (follows the system setting), phone layout. |
 | `backend/motion/store.py` | Motion's projects on disk: scenes, props, storyboard, patches, undo snapshots, assets, brand kits (and the two AlgoInsight kits), the bundle the player draws, the project state Claude sees, and the checks run on every scene Claude writes. |
 | `backend/motion/prompts.py` | Claude's system prompt (how to make a video, the scene file contract, the rules) and its tools. |
+| `backend/motion/publishing.py` | Playlists and courses (`collections.json`), the publishing details' format for YouTube and Udemy (what each field holds and its limits), the checks a top creator would make on them, and the descriptions assembled as they are pasted (and DETAILS.md). |
 | `backend/motion/agent.py` | The chat loop on the API: streams Claude's reply into the chat, runs its tools, the style question, error handling, cost. |
 | `backend/motion/claude_code.py` | The same turn on Claude Code (the Claude Agent SDK): Motion's tools served in-process, web search for facts, your login. |
 | `backend/motion/voice.py` | Narration: the pronunciation table, cue positions, ElevenLabs with-timestamps (Pooja, Eleven v4), cue times, the narration track. |
 | `frontend/src/motion/player/paper.ts` | The paper look: the frame, torn labels, components, tear and turn, the end screen, the fx entrances and their sounds. |
+| `frontend/src/motion/player/frame.ts` | The frame in the other kits: the kit's logo bottom-left and its web address bottom-right, as pills in the kit's colours (at the top in 9:16). |
+| `frontend/src/motion/player/kit/` | The explainer kit: `types.ts` (what a module gets and gives back), `index.ts` (the modules, and the load, prepare, make, finish, ready and sync steps the runtime calls), and one module per part: `icons.ts` (icons and logos), `sketch.ts` (the Excalidraw look), `excalidraw.ts` (the user's drawings), `ds.ts` (coding visuals and the terminal), `sequence.ts`, `cast.ts` and `toon.ts` (people: our own cartoon rig) and `broll.ts` (clips kept at the scene time; an export frame waits for its clip). |
+| `frontend/scripts/build-kit-icons.mjs` | Writes the kit's icons and logo index into `public/assets/motion/kit` from the Lucide package and the films' logo library (its header says how to run it). |
+| `backend/motion/kitdata.py` | The kit as the backend reads it: find_icons, the checks for icon, logo and person names, and the cast list in the system prompt. |
+| `backend/motion/broll.py` | B-roll: clip conversion (a background worker), the Pexels and Pixabay search and import, and the credits. |
 | `backend/motion/render.py` | Headless Edge/Chrome through Playwright: one frame with a layout report (for Claude's checks and posters), and the MP4 export (per-scene H.264, content-hash cache, concat, soundtrack). |
 | `backend/motion/brand.py`, `hub.py`, `jobs.py`, `api.py` | Brand kit from a website; the chat log and live updates; the export queue; the HTTP routes. |
 | `backend/test_motion.py` | Offline Motion tests (no API key, browser or network). |

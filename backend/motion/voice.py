@@ -39,6 +39,16 @@ ELEVENLABS = "https://api.elevenlabs.io/v1/text-to-speech"
 OUTPUT_FORMAT = "mp3_44100_128"
 CUE_RE = re.compile(r"<\s*cue\s*/?\s*>", re.IGNORECASE)
 TAG_RE = re.compile(r"<[^>]+>")
+# A place in Claude's draft for the user's own words: [[you: a time an interview went wrong because of
+# this]]. Claude leaves one where only the user can say it (a story of their own, an opinion, a real number
+# from their own runs) instead of making it up. The user replaces each with their words before the script
+# is approved; the voice never reads one.
+SLOT_RE = re.compile(r"\[\[\s*you\s*:\s*(.*?)\s*\]\]", re.IGNORECASE | re.DOTALL)
+
+
+def slots(narration: str) -> list[str]:
+    """What each place left for the user's own words asks for, in order."""
+    return [m.group(1).strip() for m in SLOT_RE.finditer(narration or "")]
 
 
 class VoiceError(Exception):
@@ -106,8 +116,10 @@ NARRATION_RULES = [
 
 
 def check_narration(narration: str) -> list[str]:
-    """The daily films' voice rules: what in a narration would be read wrong or sound written."""
-    text = CUE_RE.sub(" ", narration or "")
+    """The daily films' voice rules: what in a narration would be read wrong or sound written. A place left
+    for the user's own words ([[you: ...]]) is not narration yet, so it isn't checked."""
+    narration = SLOT_RE.sub(" ", narration or "")
+    text = CUE_RE.sub(" ", narration)
     out = []
     for rx, what in NARRATION_RULES:
         if rx.search(text):

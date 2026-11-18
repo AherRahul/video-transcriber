@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import html
 import json
 import math
 import os
@@ -37,7 +38,9 @@ from typing import Callable
 
 from . import voice as vc
 
-RUNTIME_VERSION = "7"  # bump when the player changes how a frame looks, so cached scene files are redone
+RUNTIME_VERSION = "8"  # bump when the player changes how a frame looks, so cached scene files are redone
+# 8: fx.link arrows are straight (they bow only to get round words or a card, and a pair runs side by side);
+#    fx.circle loops hug their target instead of an ellipse through its corners that ran over its neighbours
 # 7: the camera keeps the page's top content below the header (a zoom pushed rows over the logo, label
 #    and title); the layout report's overflow check (words running into their box's padding)
 # 4: arrow tips, the slate web address, CSS tilts kept (stamps, stickies, tags), the logo/url settings
@@ -46,6 +49,42 @@ RUNTIME_VERSION = "7"  # bump when the player changes how a frame looks, so cach
 #    fonts no longer race each other while loading (a family could go missing and fall back silently)
 DEFAULT_PAGES = max(1, min(4, int(os.environ.get("MOTION_RENDER_PAGES", "3"))))
 RESOLUTIONS = (720, 1080, 2160)
+DEFAULT_RESOLUTION = 2160  # every export is 4K unless asked otherwise
+# How an export's frames become video. Each scene file in the cache is keyed by this too: scene files from
+# two encoders can't be joined into one MP4 without re-encoding.
+#   capture: the stage is drawn at the output size (a CSS scale, the layout unchanged) and captured 1:1 (a 2.4x scaled
+#            screenshot of the 1600 x 900 page re-drew the whole page every frame: 4 frames a second with
+#            three pages, against about 12 now), and a frame whose page is unchanged is reused, not captured
+#            (two frames in three of an explainer repeat the one before)
+#   chain:   the paper's grain is decoded once and looped in memory (as an image input it was decoded again for
+#            every frame), and frames stay in YUV (no RGB round trip): 29 frames a second for three encoders at
+#            4K before, about 47 after
+ENCODE_VERSION = "2"
+FRAME_QUEUE = 24  # frames waiting for one scene's FFmpeg (about 28 MB at 4K): the page captures on while it encodes
+QSV_ARGS = ["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "21", "-profile:v", "high"]
+X264_ARGS = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-profile:v", "high"]
+_encoder_cache: dict[str, str] = {}
+
+
+def video_encoder(ffmpeg: str) -> str:
+    """qsv (Intel Quick Sync, the GPU's own video engine) when this computer's FFmpeg can open it, otherwise
+    x264 on the CPU. MOTION_ENCODER=x264 or qsv forces one. Checked once per FFmpeg."""
+    wanted = os.environ.get("MOTION_ENCODER", "").lower()
+    if wanted in ("x264", "qsv"):
+        return wanted
+    if ffmpeg not in _encoder_cache:
+        import subprocess
+
+        try:
+            ok = subprocess.run(
+                [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=gray:s=3840x2160:d=0.2:r=30",
+                 "-vf", "format=nv12", *QSV_ARGS, "-f", "null", "-"],
+                capture_output=True, timeout=60,
+            ).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        _encoder_cache[ffmpeg] = "qsv" if ok else "x264"
+    return _encoder_cache[ffmpeg]
 # how loud each paper sound sits under the voice
 SFX_GAIN = {"rip": 0.55, "page": 0.5, "stamp": 0.6, "crumple": 0.5, "pop": 0.35, "pencil": 0.22, "whoosh": 0.35, "ding": 0.4, "thump": 0.45, "type": 0.25, "sting": 0.45, "slap": 0.45, "popper": 0.4}
 # The audio finish. YouTube plays everything at about -14 LUFS, so the mix is brought there itself (a mix
@@ -61,6 +100,21 @@ MUSIC_ALONE = 0.6  # music in a video without narration
 DUCK = "threshold=0.02:ratio=6:attack=20:release=600:knee=4"
 THUMBNAIL_AT = 2.95  # the moment of the 3 second thumbnail scene that is photographed
 THUMBNAIL_WIDTH = 1280  # YouTube's thumbnail size: 1280 x 720
+
+
+SEEK_FRAME = """([id, t, fresh]) => {
+    const p = window.MotionPlayer;
+    if (p.seekFrame) return p.seekFrame(id, t, fresh);
+    p.seekScene(id, t);
+    return true;
+}"""
+# one moment for a single picture (Claude's checks, posters, the thumbnail): a page with a b-roll clip answers
+# once the clip shows that frame (seekFrame and settle wait for it; an older player has neither)
+SEEK_SETTLE = """([id, t]) => {
+    const p = window.MotionPlayer;
+    p.seekScene(id, t);
+    return p.settle ? p.settle() : null;
+}"""
 
 
 class RenderError(Exception):
@@ -89,9 +143,25 @@ def scene_frames(duration: float, fps: int) -> int:
     return max(1, round(duration * fps))
 
 
-def scene_hashes(bundle: dict, assets_dir: Path | None, ow: int, oh: int) -> list[str]:
+def player_fingerprint(dist_dir: Path | None) -> str:
+    """The built player page's own fingerprint. Vite names each file by a hash of its content and the page
+    names the files it loads, so a rebuild with a changed player changes the page. Scenes rendered by the
+    old player are then redone even when RUNTIME_VERSION was not bumped (a server restarted on the new
+    version before the page was rebuilt used to cache the old look under the new version). Empty when
+    there is no build (tests)."""
+    if not dist_dir:
+        return ""
+    try:
+        return hashlib.sha256((Path(dist_dir) / "motion-player.html").read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
+def scene_hashes(bundle: dict, assets_dir: Path | None, ow: int, oh: int, player: str = "", encoder: str = "") -> list[str]:
     """One hash per scene from everything that changes its pixels. A scene that fades or slides in also
-    depends on the scene before it, whose last frame shows underneath."""
+    depends on the scene before it, whose last frame shows underneath. `player` is the built player's
+    fingerprint (player_fingerprint), `encoder` how the frames were encoded (scene files from two encoders
+    can't be joined without re-encoding)."""
     asset_sig = []
     if assets_dir and assets_dir.exists():
         for f in sorted(assets_dir.iterdir()):
@@ -100,6 +170,8 @@ def scene_hashes(bundle: dict, assets_dir: Path | None, ow: int, oh: int) -> lis
                 asset_sig.append([f.name, st.st_size, st.st_mtime_ns])
     common = {
         "runtime": RUNTIME_VERSION,
+        **({"player": player} if player else {}),
+        **({"encoder": encoder} if encoder else {}),
         "stage": [bundle["width"], bundle["height"]],
         "out": [ow, oh],
         "fps": bundle["fps"],
@@ -223,27 +295,41 @@ class RenderService:
             return await route.continue_()
         return await route.abort()
 
-    async def _open(self, bundle: dict) -> dict:
+    async def _open(self, bundle: dict, zoom: float | None = None) -> dict:
+        """A page with the video loaded. With zoom (the export), the stage is drawn at the output size: a CSS
+        scale on the stage, set before the scenes are built, as the editor's preview fits its stage, so the
+        layout is the stage's own (CSS zoom laid the page out again at 4K and moved things a few pixels).
+        Frames are then captured 1:1, which is about three times faster than a scaled capture."""
         if not self.player_built():
             raise RenderError("The page is not built yet: run `npm run build` in the frontend folder, then try again.")
         browser = await self._get_browser()
-        ctx = await browser.new_context(viewport={"width": bundle["width"], "height": bundle["height"]}, device_scale_factor=1)
+        vw, vh = (round(bundle["width"] * zoom), round(bundle["height"] * zoom)) if zoom else (bundle["width"], bundle["height"])
+        ctx = await browser.new_context(viewport={"width": vw, "height": vh}, device_scale_factor=1)
         page = await ctx.new_page()
         await page.route("**/*", self._route)
         errors: list[str] = []
         page.on("pageerror", lambda e: errors.append(str(e)[:300]))
         await page.goto(self.base_url + "/motion-player.html?mode=render", wait_until="load")
         await page.wait_for_function("() => window.MotionPlayer && window.MotionPlayer.ready === true", timeout=20000)
+        if zoom:
+            await page.evaluate("z => { const st = document.getElementById('stage'); st.style.transformOrigin = '0 0'; st.style.transform = 'scale(' + z + ')'; }", zoom)
         info = await page.evaluate("b => window.MotionPlayer.load(b)", bundle)
         cdp = await ctx.new_cdp_session(page)
-        return {"ctx": ctx, "page": page, "cdp": cdp, "info": info, "errors": errors, "size": (bundle["width"], bundle["height"]), "used": time.time(), "bundle": bundle}
+        return {"ctx": ctx, "page": page, "cdp": cdp, "info": info, "errors": errors, "size": (bundle["width"], bundle["height"]), "used": time.time(), "bundle": bundle, "zoom": zoom}
 
     @staticmethod
     async def _shot(h: dict, scene_id: str, local_t: float, fmt: str, scale: float, quality: int | None = None) -> bytes:
-        await h["page"].evaluate("([id, t]) => window.MotionPlayer.seekScene(id, t)", [scene_id, local_t])
+        # a page with a b-roll clip is captured once the clip shows that frame (settle; older players have none)
+        await h["page"].evaluate(SEEK_SETTLE, [scene_id, local_t])
+        return await RenderService._capture(h, fmt, scale, quality)
+
+    @staticmethod
+    async def _capture(h: dict, fmt: str, scale: float = 1.0, quality: int | None = None) -> bytes:
+        """The page as it shows now. A page at the output size (zoom) is captured 1:1; otherwise a scale other
+        than 1 makes the browser draw the page that much larger for the capture."""
         w, hgt = h["size"]
         params: dict = {"format": fmt, "optimizeForSpeed": True, "captureBeyondViewport": False}
-        if abs(scale - 1) > 1e-6:
+        if not h.get("zoom") and abs(scale - 1) > 1e-6:
             params["clip"] = {"x": 0, "y": 0, "width": w, "height": hgt, "scale": scale}
         if quality is not None:
             params["quality"] = quality
@@ -336,6 +422,66 @@ class RenderService:
         img, _ = await self.preview_frame(bundle, scene["id"], min(2.0, scene["duration"] * 0.6), width)
         return img
 
+    async def thumbnail_feed(self, jpeg: bytes, title: str, length: str, channel: str = "") -> tuple[bytes, dict]:
+        """How the thumbnail looks where it has to work: at YouTube's feed size (360 x 202) between two plain
+        placeholder videos, on the white page and on the dark one, with the title under it. Also measures its
+        colours on a 160 x 90 copy: pale (light and nearly grey, like the graph paper or white), dark and vivid
+        (strongly coloured) shares of the picture. Returns (the feed view as a JPEG, the shares)."""
+        browser = await self._get_browser()
+        ctx = await browser.new_context(viewport={"width": 1176, "height": 200}, device_scale_factor=1)  # the full-page shot takes the rows' height
+        try:
+            page = await ctx.new_page()
+            src = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
+            esc = html.escape
+
+            def card(real: bool) -> str:
+                if not real:
+                    return '<div class="card"><div class="thumb ph"></div><div class="bar"></div><div class="bar short"></div></div>'
+                return (
+                    f'<div class="card"><div class="thumb"><img src="{src}"><span class="dur">{esc(length)}</span></div>'
+                    f'<div class="t">{esc(title)}</div><div class="m">{esc(channel)}</div></div>'
+                )
+
+            row = card(False) + card(True) + card(False)
+            await page.set_content(
+                "<!doctype html><html><head><meta charset='utf-8'><style>"
+                "body{margin:0;font-family:Roboto,Arial,sans-serif}"
+                ".page{display:flex;gap:24px;padding:18px 24px 16px}"
+                ".light{background:#fff;color:#0f0f0f}.dark{background:#0f0f0f;color:#f1f1f1}"
+                ".card{width:360px;flex:none}.thumb{width:360px;height:202px;border-radius:12px;overflow:hidden;position:relative}"
+                ".thumb img{width:100%;height:100%;display:block}"
+                ".ph{background:repeating-linear-gradient(135deg,#d6d6d6 0 14px,#cbcbcb 14px 28px)}"
+                ".dark .ph{background:repeating-linear-gradient(135deg,#3b3b3b 0 14px,#333 14px 28px)}"
+                ".dur{position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.8);color:#fff;font-size:12px;font-weight:600;padding:1px 4px;border-radius:4px}"
+                ".t{font-size:15px;font-weight:600;line-height:1.35;margin:10px 0 2px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}"
+                ".m{font-size:12.5px;opacity:.7}.bar{height:14px;border-radius:4px;margin:12px 0 0;background:currentColor;opacity:.14}.bar.short{width:60%;margin-top:8px}"
+                f"</style></head><body><div class='page light'>{row}</div><div class='page dark'>{row}</div></body></html>"
+            )
+            await page.wait_for_load_state("load")
+            stats = await page.evaluate(
+                """async (src) => {
+                    const img = new Image(); img.src = src; await img.decode();
+                    const c = document.createElement('canvas'); c.width = 160; c.height = 90;
+                    const g = c.getContext('2d'); g.drawImage(img, 0, 0, 160, 90);
+                    const d = g.getImageData(0, 0, 160, 90).data;
+                    let pale = 0, dark = 0, vivid = 0; const n = d.length / 4;
+                    for (let i = 0; i < d.length; i += 4) {
+                        const r = d[i] / 255, gg = d[i + 1] / 255, b = d[i + 2] / 255;
+                        const mx = Math.max(r, gg, b), mn = Math.min(r, gg, b), chroma = mx - mn;
+                        const lum = 0.2126 * r + 0.7152 * gg + 0.0722 * b;
+                        if (lum > 0.8 && chroma < 0.12) pale++;
+                        else if (lum < 0.25) dark++;
+                        else if (chroma > 0.35) vivid++;
+                    }
+                    return { pale: pale / n, dark: dark / n, vivid: vivid / n };
+                }""",
+                src,
+            )
+            shot = await page.screenshot(type="jpeg", quality=85, full_page=True)
+            return shot, {k: round(float(v), 3) for k, v in stats.items()}
+        finally:
+            await ctx.close()
+
     async def screenshot_url(self, url: str, width: int = 1280, height: int = 800) -> bytes:
         """A screenshot of a public web page (for the brand extraction)."""
         browser = await self._get_browser()
@@ -386,64 +532,106 @@ class RenderService:
             raise RenderError(f"These scenes have no code yet: {missing}. Ask Claude to finish them first.")
         fps = bundle["fps"]
         ow, oh, scale = output_size(bundle["width"], bundle["height"], resolution)
-        hashes = scene_hashes(bundle, assets_dir, ow, oh)
+        encoder = video_encoder(ffmpeg)
+        hashes = scene_hashes(bundle, assets_dir, ow, oh, player_fingerprint(self.dist_dir), f"{encoder}-{ENCODE_VERSION}")
         cache_dir.mkdir(parents=True, exist_ok=True)
         files = [cache_dir / f"{h}.mp4" for h in hashes]
         todo = [i for i, f in enumerate(files) if not f.exists()]
         total_frames = sum(scene_frames(scenes[i]["duration"], fps) for i in todo) or 1
-        done = {"frames": 0}
+        done = {"frames": 0, "captured": 0}
         progress(0.0, f"{len(scenes) - len(todo)} of {len(scenes)} scenes unchanged, rendering {len(todo)}")
 
-        async def encode_scene(h: dict, i: int) -> None:
+        async def encode_scene(h: dict, i: int) -> asyncio.Task:
+            """Captures scene i's frames into its own FFmpeg and returns the task that finishes its file, so the
+            page can start the next scene while FFmpeg works through this one's last frames."""
             s = scenes[i]
             n = scene_frames(s["duration"], fps)
             tmp = files[i].with_suffix(".part.mp4")
-            # frames arrive as JPEG (quality 92); the paper's film grain is laid over here, not captured: noise in
-            # every captured frame made capture about twice as slow
+            # Frames arrive as JPEG (quality 92: the browser's JPEG is BT.601 full range), already at the output
+            # size. They become BT.709 TV range here, and the paper's film grain is laid over them (noise in every
+            # captured frame made capture about twice as slow): decoded once and looped, all in YUV.
+            to709 = f"scale={ow}:{oh}:in_range=pc:out_range=tv:in_color_matrix=bt601:out_color_matrix=bt709,format=yuv420p"
+            tail = ",format=nv12" if encoder == "qsv" else ""
             if grain:
-                video = ["-loop", "1", "-framerate", str(fps), "-i", str(grain),
-                         "-filter_complex", f"[0:v]scale={ow}:{oh}:flags=lanczos,format=rgb24[v];[1:v]format=rgba[g];[v][g]overlay=shortest=1:format=rgb,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p[o]",
+                video = ["-i", str(grain), "-filter_complex",
+                         f"[1:v]format=yuva420p,loop=loop=-1:size=1:start=0[g];[0:v]{to709}[v];[v][g]overlay=shortest=1:format=yuv420{tail}[o]",
                          "-map", "[o]"]
             else:
-                video = ["-vf", f"scale={ow}:{oh}:flags=lanczos:out_color_matrix=bt709:out_range=tv,format=yuv420p"]
+                video = ["-vf", to709 + tail]
             cmd = [
                 ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "image2pipe", "-framerate", str(fps), "-c:v", "mjpeg", "-i", "-",
                 *video,
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-profile:v", "high",
+                *(QSV_ARGS if encoder == "qsv" else X264_ARGS),
                 "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
                 "-r", str(fps), "-video_track_timescale", str(fps * 512), "-movflags", "+faststart", str(tmp),
             ]
             proc = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-            try:
-                for k in range(n):
-                    if cancel.is_set():
-                        raise Cancelled()
-                    data = await self._shot(h, s["id"], k / fps, "jpeg", scale, quality=92)
-                    proc.stdin.write(data)
+            # FFmpeg takes the frames at its own pace from a short queue while the page goes on capturing (the page
+            # used to wait about 40 ms on every frame, a repeated one too, while FFmpeg took it in)
+            frames: asyncio.Queue = asyncio.Queue(maxsize=FRAME_QUEUE)
+
+            async def feed() -> None:
+                while (item := await frames.get()) is not None:
+                    proc.stdin.write(item)
                     await proc.stdin.drain()
-                    done["frames"] += 1
-                    if done["frames"] % 10 == 0 or k == n - 1:
-                        progress(done["frames"] / total_frames * 0.95, f"Rendering scene {i + 1} of {len(scenes)} ({s['name']})")
                 proc.stdin.close()
-                err = await proc.stderr.read()
-                rc = await proc.wait()
-                if rc != 0:
-                    raise RenderError(f"FFmpeg failed on scene {s['id']}: {err.decode(errors='replace')[-400:]}")
-                os.replace(tmp, files[i])  # only a cleanly finished file enters the cache
-            except BaseException:
+
+            writer = asyncio.create_task(feed())
+
+            async def put(item: bytes | None) -> None:
+                putting = asyncio.ensure_future(frames.put(item))
+                await asyncio.wait({putting, writer}, return_when=asyncio.FIRST_COMPLETED)
+                if not putting.done():  # the writer stopped (FFmpeg quit): its error says why
+                    putting.cancel()
+                    writer.result()
+                    raise RenderError(f"FFmpeg stopped taking frames on scene {s['id']}.")
+
+            async def discard() -> None:
+                writer.cancel()
                 if proc.returncode is None:
                     proc.kill()
                     await proc.wait()
                 tmp.unlink(missing_ok=True)
+
+            async def finish() -> None:
+                try:
+                    await writer
+                    err = await proc.stderr.read()
+                    rc = await proc.wait()
+                    if rc != 0:
+                        raise RenderError(f"FFmpeg failed on scene {s['id']}: {err.decode(errors='replace')[-400:]}")
+                    os.replace(tmp, files[i])  # only a cleanly finished file enters the cache
+                except BaseException:
+                    await discard()
+                    raise
+
+            try:
+                data = b""
+                for k in range(n):
+                    if cancel.is_set():
+                        raise Cancelled()
+                    # a frame whose page is exactly as before is the frame before: sent again, not captured
+                    changed = await h["page"].evaluate(SEEK_FRAME, [s["id"], k / fps, k == 0])
+                    if changed or not data:
+                        data = await self._capture(h, "jpeg", scale, quality=92)
+                        done["captured"] += 1
+                    await put(data)
+                    done["frames"] += 1
+                    if done["frames"] % 10 == 0 or k == n - 1:
+                        progress(done["frames"] / total_frames * 0.95, f"Rendering scene {i + 1} of {len(scenes)} ({s['name']})")
+                await put(None)
+            except BaseException:
+                await discard()
                 raise
+            return asyncio.create_task(finish())
 
         handles: list[dict] = []
         sfx: list[dict] = []
         grain: Path | None = None
         try:
             pages = min(DEFAULT_PAGES, len(todo)) if todo else 1
-            handles = [await self._open(bundle) for _ in range(pages)]
+            handles = [await self._open(bundle, zoom=scale) for _ in range(pages)]
             if bundle.get("theme") == "paper":
                 grain = cache_dir / f"grain-{ow}x{oh}.png"
                 if not grain.exists():
@@ -456,11 +644,24 @@ class RenderService:
             # the sound effects the scenes' entrances asked for, scene by scene (local seconds)
             sfx = await handles[0]["page"].evaluate("() => window.MotionPlayer.sfx ? window.MotionPlayer.sfx() : []")
             if todo:
-                queue = list(todo)
+                # the longest scenes first, so no page is left with a long one at the end while the others wait
+                queue = sorted(todo, key=lambda i: -scenes[i]["duration"])
 
                 async def worker(h: dict) -> None:
-                    while queue:
-                        await encode_scene(h, queue.pop(0))
+                    # one scene's file may still be finishing while the page captures the next; never two
+                    finishing: asyncio.Task | None = None
+                    try:
+                        while queue:
+                            started = await encode_scene(h, queue.pop(0))
+                            if finishing:
+                                await finishing
+                            finishing = started
+                        if finishing:
+                            await finishing
+                    except BaseException:
+                        if finishing and not finishing.done():
+                            finishing.cancel()
+                        raise
 
                 await asyncio.gather(*(worker(h) for h in handles))
         finally:
@@ -505,6 +706,9 @@ class RenderService:
             "seconds": round(sum(scene_frames(s["duration"], fps) for s in scenes) / fps, 2),
             "renderedScenes": len(todo),
             "cachedScenes": len(scenes) - len(todo),
+            "capturedFrames": done["captured"],  # the rest repeated the frame before and were reused
+            "renderedFrames": total_frames if todo else 0,
+            "encoder": encoder,
             "took": round(time.time() - started, 1),
             "loudness": level,  # what the mix was measured at and set to, or None
         }
@@ -522,7 +726,8 @@ class RenderService:
         }""")
         await cdp.send("Emulation.setDefaultBackgroundColorOverride", {"color": {"r": 0, "g": 0, "b": 0, "a": 0}})
         w, hgt = h["size"]
-        r = await cdp.send("Page.captureScreenshot", {"format": "png", "clip": {"x": 0, "y": 0, "width": w, "height": hgt, "scale": scale}})
+        params = {"format": "png"} if h.get("zoom") else {"format": "png", "clip": {"x": 0, "y": 0, "width": w, "height": hgt, "scale": scale}}
+        r = await cdp.send("Page.captureScreenshot", params)
         out.write_bytes(base64.b64decode(r["data"]))
         await cdp.send("Emulation.setDefaultBackgroundColorOverride", {})
         h["info"] = await page.evaluate("b => window.MotionPlayer.load(b)", h["bundle"])

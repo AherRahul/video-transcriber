@@ -9,6 +9,7 @@ GET  /api/jobs/{id}/frames    -> {state, percent, message, items: [{t, url, file
 GET  /api/jobs/{id}/frames/{file}  -> one screenshot (JPEG)
 GET  /api/jobs/{id}/frames.zip     -> every screenshot, REFERENCES.md and references.json
 GET  /api/health              -> tools found
+GET  /api/busy                -> work a restart would cut short (dev.py waits for it)
      /api/motion/...           -> Motion: short animated videos made by Claude (see motion/api.py)
 
 Jobs run one at a time in a background thread (Whisper uses every CPU core) and live in memory
@@ -19,6 +20,7 @@ outlive the job in memory and a restart.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import threading
@@ -110,6 +112,18 @@ def _public(job: dict) -> dict:
     if t:
         out["transcript"] = asdict(t)
     return out
+
+
+@app.get("/api/busy")
+def busy() -> dict:
+    """Work a restart would cut short: transcriptions (and their screenshots) here, and Motion's exports,
+    voice jobs and Claude turns. The dev runner (dev.py) waits for all of it before it restarts the server."""
+    with _lock:
+        jobs = list(_jobs.values())
+    transcribing = sum(1 for j in jobs if j.get("state") in ("queued", "running") or (j.get("frames") or {}).get("state") in ("waiting", "running"))
+    motion = app.state.motion_busy() if hasattr(app.state, "motion_busy") else {}
+    counts = {"transcriptions": transcribing, **motion}
+    return {"busy": any(counts.values()), **counts}
 
 
 @app.get("/api/health")
@@ -241,7 +255,9 @@ if _dist.exists():
 
     @app.get("/")
     def index() -> FileResponse:
-        return FileResponse(_dist / "index.html")
+        # no-cache: the browser asks again every time (a 304 when nothing changed). A rebuild deletes the old
+        # hashed scripts, so a page kept from before it would point at files that are gone.
+        return FileResponse(_dist / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 if __name__ == "__main__":
@@ -249,4 +265,5 @@ if __name__ == "__main__":
 
     if not shutil.which("ffmpeg") and not tr.find_ffmpeg():
         print("Warning: FFmpeg not found; some sites (HLS streams) will fail.")
-    uvicorn.run(app, host="127.0.0.1", port=8765)
+    # TRANSCRIBER_PORT runs a second copy beside the usual one (a test copy, or dev.py's)
+    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("TRANSCRIBER_PORT", "8765")))

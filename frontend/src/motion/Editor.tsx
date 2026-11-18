@@ -15,14 +15,23 @@ import Chat, { type Command, type SendInput } from "./Chat";
 import Preview from "./Preview";
 import PropsPanel from "./PropsPanel";
 import PublishPanel, { THUMBNAIL_TEXT } from "./PublishPanel";
+import DetailsModal from "./PublishDetails";
 import ScriptModal from "./ScriptModal";
-import { isBuildable, type Aspect, type Asset, type BrandKit, type CommentTarget, type ExportJob, type HubOp, type LogEntry, type MotionHealth, type ProjectView, type VoiceJob } from "./types";
+import { TONE_OPTIONS, isBuildable, type Aspect, type Asset, type BrandKit, type CommentTarget, type ExportJob, type HubOp, type LogEntry, type MotionHealth, type ProjectView, type Tone, type VoiceJob } from "./types";
 import VideoSettings, { closingSummary, destinationOf } from "./VideoSettings";
 import VoicePanel from "./VoicePanel";
 
 type Props = { projectId: string; health: MotionHealth | null; onBack: () => void; onOpen: (id: string) => void };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Sent for the user when they pick a new tone for a script that is already written. */
+const toneText = (label: string) =>
+  `I changed the script's tone to ${label}. Rewrite the narration in that tone (see Tone), scene by scene, keeping the same ideas, facts, cues and places for my words. Leave the scenes I rewrote in my own words exactly as they are.`;
+
+/** Sent for the user when they approve the script in their own words. */
+const BUILD_TEXT =
+  "I've put the script in my own words and approved it. Build the scenes now, keeping my wording exactly as it is.";
 
 export default function Editor({ projectId, health, onBack, onOpen }: Props) {
   const [view, setView] = useState<ProjectView | null>(null);
@@ -33,6 +42,8 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
   const [job, setJob] = useState<ExportJob | null>(null);
   const [voiceJob, setVoiceJob] = useState<VoiceJob | null>(null);
   const [scriptOpen, setScriptOpen] = useState(false);
+  const [scriptTab, setScriptTab] = useState<string | undefined>(undefined);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [kitEditor, setKitEditor] = useState<{ kit: BrandKit | null; copyFrom?: BrandKit | null } | null>(null);
@@ -109,6 +120,10 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
         case "export":
           setJob(op.job);
           if (op.job.state === "done") refreshView();
+          break;
+        case "assets":
+          // a b-roll clip finished converting, or Claude imported one
+          void refreshAssets();
           break;
         case "kits":
           void refreshKits();
@@ -206,8 +221,19 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
 
   const patch = (body: Record<string, unknown>) => act(async () => applyView(await motionApi.patchProject(projectId, body)));
 
+  /** A new tone. With a script already written, Claude rewrites the draft in it when the user says yes (the
+   *  tone alone shapes only the next draft, so a written script used to stay as it was). */
+  async function changeTone(tone: Tone) {
+    await patch({ tone });
+    const hasScript = (view?.script?.narrated ?? 0) > 0;
+    const label = TONE_OPTIONS.find((t) => t.id === tone)?.label ?? tone;
+    if (hasScript && !running && window.confirm(`Ask Claude to rewrite the script in the ${label} tone now? Scenes you put in your own words stay as they are.`)) {
+      await act(() => send({ text: toneText(label), attachments: [] }));
+    }
+  }
+
   async function command(cmd: Command) {
-    if (cmd === "export") await act(async () => setJob(await motionApi.startExport(projectId, 1080)));
+    if (cmd === "export") await act(async () => setJob(await motionApi.startExport(projectId, 2160)));
     else if (cmd === "undo") await act(async () => applyView(await motionApi.undo(projectId)));
     else if (cmd === "clear") await act(() => motionApi.newChat(projectId));
     else if (cmd === "new") await act(async () => onOpen((await motionApi.createProject({ brandKitId: view?.project.brandKitId })).project.id));
@@ -226,6 +252,8 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
   const narrated = bundle.scenes.filter((s) => s.narration && s.kind !== "endscreen");
   const voicedCount = narrated.filter((s) => s.voiced).length;
   const destination = destinationOf(view);
+  // places Claude's draft left for the user's own words, while the script waits for them
+  const waitingSlots = (view.script?.slots ?? []).reduce((n, x) => n + x.asks.length, 0);
 
   /** Moves the selection to the scene before or after this one (the preview follows). */
   const stepScene = (delta: number) => {
@@ -312,6 +340,21 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
             </div>
           ) : null}
         </div>
+        {/* the script's tone, right on the top bar (it was only in the For YouTube menu, easy to miss) */}
+        <select
+          className="mo-select mo-tone-select"
+          value={view.project.tone ?? "normal"}
+          disabled={running}
+          aria-label="Script tone"
+          title={TONE_OPTIONS.find((t) => t.id === (view.project.tone ?? "normal"))?.hint ?? "The script's tone"}
+          onChange={(e) => void changeTone(e.target.value as Tone)}
+        >
+          {TONE_OPTIONS.map((t) => (
+            <option key={t.id} value={t.id}>
+              Tone: {t.label}
+            </option>
+          ))}
+        </select>
         <span className="mo-spacer" />
         <div className="mo-menu-wrap">
           <button type="button" className={`btn btn-small ${menu === "settings" ? "btn-on" : ""}`} onClick={() => setMenu(menu === "settings" ? null : "settings")}>
@@ -386,8 +429,19 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
         >
           Undo
         </button>
+        {/* Details: where the video sits (playlist or course, episode), downloaded and uploaded, and every
+            YouTube and Udemy field with copy buttons */}
+        <button
+          type="button"
+          className={`btn btn-small ${detailsOpen ? "btn-on" : ""}`}
+          onClick={() => setDetailsOpen(true)}
+          title="The playlist or course, downloaded and uploaded, and the titles, description, tags and quiz for the upload"
+        >
+          Details
+          {view.project.status?.uploadedAt ? " ✓" : ""}
+        </button>
         {/* Publish: its own menu with everything the upload needs (the thumbnail, the captions, the
-            chapters and YOUTUBE.md, one by one or in one zip, and the latest MP4) */}
+            chapters and DETAILS.md, one by one or in one zip, and the latest MP4) */}
         <div className="mo-menu-wrap">
           <button
             type="button"
@@ -450,6 +504,18 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
           </button>
         </div>
       ) : null}
+      {view.script?.waiting && view.script.narrated && !running ? (
+        <div className="banner banner-warn mo-banner mo-words-banner" role="status">
+          <span>
+            Your turn: Claude's draft is ready for your own words
+            {waitingSlots ? ` (${waitingSlots} place${waitingSlots === 1 ? "" : "s"} for your story, opinions and numbers)` : ""}. Claude builds the scenes once you
+            approve it.
+          </span>
+          <button type="button" className="btn btn-small" onClick={() => (setScriptTab("words"), setScriptOpen(true))}>
+            Open Your words
+          </button>
+        </div>
+      ) : null}
       {health && engine === "api" && !health.claude.ready ? (
         <div className="banner banner-warn mo-banner">
           No Claude API key found. Put <code>ANTHROPIC_API_KEY=...</code> in <code>backend\.env</code> (or set it in your environment) and restart the app.
@@ -499,7 +565,27 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
         </section>
       </div>
 
-      {scriptOpen ? <ScriptModal projectId={projectId} onClose={() => setScriptOpen(false)} /> : null}
+      {detailsOpen ? (
+        <DetailsModal
+          projectId={projectId}
+          title={view.project.title}
+          version={view.project.version}
+          onAsk={(text) => send({ text, attachments: [] })}
+          onChanged={refreshView}
+          onClose={() => setDetailsOpen(false)}
+        />
+      ) : null}
+      {scriptOpen ? (
+        <ScriptModal
+          projectId={projectId}
+          view={view}
+          running={running}
+          initialTab={scriptTab}
+          onSaved={applyView}
+          onBuild={() => void act(() => send({ text: BUILD_TEXT, attachments: [] }))}
+          onClose={() => (setScriptOpen(false), setScriptTab(undefined))}
+        />
+      ) : null}
       {kitEditor ? (
         <BrandKitEditor
           kit={kitEditor.kit}
@@ -547,7 +633,7 @@ function ExportPanel({
   onUploadMusic: (file: File) => Promise<void>;
   onOpen: (menu: "voice" | "video") => void;
 }) {
-  const [res, setRes] = useState(1080);
+  const res = 2160; // every export is 4K
   const [withVoice, setWithVoice] = useState(true);
   const [withSfx, setWithSfx] = useState(true);
   const [evenLoudness, setEvenLoudness] = useState(true);
@@ -559,7 +645,9 @@ function ExportPanel({
   const voiced = narrated.filter((s) => s.voiced).length;
   const paper = b.theme === "paper";
   const minutes = Math.round(b.duration / 60);
-  const estimate = Math.max(1, Math.round((b.duration * 30 * (res === 2160 ? 0.3 : 0.1)) / 60));
+  // a first 4K export takes about twice the video's length on this laptop (measured 2026-11-18 with the GPU
+  // encoder: 19.5 min of video about 35 min); unchanged scenes are reused after that
+  const estimate = Math.max(1, Math.round((b.duration * 2) / 60));
 
   return (
     <>
@@ -579,13 +667,10 @@ function ExportPanel({
         <>
           <div className="mo-field">
             <span className="label">Resolution</span>
-            <div className="mo-seg">
-              {[1080, 2160, 720].map((r) => (
-                <button key={r} type="button" className={res === r ? "on" : ""} onClick={() => setRes(r)}>
-                  {r === 2160 ? "4K" : `${r}p`}
-                </button>
-              ))}
-            </div>
+            <p className="muted small">
+              4K ({b.width >= b.height ? "3840 x 2160" : "2160 x 3840"}), the size every video is made in. Scenes that haven't changed since the last export are
+              reused.
+            </p>
           </div>
           <div className="mo-field">
             <span className="label">Sound</span>
@@ -683,7 +768,8 @@ function ExportPanel({
       {job?.state === "done" && job.result ? (
         <div className="mo-export-done">
           <div className="mo-export-links">
-            <a className="btn btn-primary btn-small" href={job.result.url} download>
+            {/* ?download=1 marks the video downloaded (Details shows it, the library tags it) */}
+            <a className="btn btn-primary btn-small" href={motionApi.downloadMp4Url(job.result.url)} download>
               Download MP4
             </a>
             {/* the captions written with this export (older exports, and older servers, have none) */}
@@ -714,7 +800,7 @@ function ExportPanel({
         <div className="mo-renders">
           <span className="label">Earlier exports</span>
           {view.renders.map((r) => (
-            <a key={r.file} href={r.url} download>
+            <a key={r.file} href={motionApi.downloadMp4Url(r.url)} download>
               {r.file} <span className="muted">({bytesLabel(r.bytes)}, {ago(r.at)})</span>
             </a>
           ))}

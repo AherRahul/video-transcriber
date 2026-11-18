@@ -29,7 +29,7 @@ type Props = {
 const CONTINUE_TEXT = "Continue building: write the remaining scenes in order, then run the audit, fix what it finds and finish the hand-off.";
 
 const EXAMPLES = [
-  "A narrated explainer in our daily paper look from the attached transcript: every point it teaches, in our own story and words, simple English, every fact checked.",
+  "A narrated explainer in our daily paper look on the topic of the attached video (research only, not our outline): ask me for my take and my numbers first, then a draft with places for my own words.",
   "A 30-second 9:16 reel explaining consistent hashing: a hook question, the hash ring builds step by step, one takeaway, end card.",
   "A 20-second 16:9 animated bar chart of our monthly sign-ups. Use [YOUR NUMBERS] where you need data.",
   "A 6-second logo sting for our brand: the logo draws itself, then the tagline.",
@@ -358,8 +358,16 @@ export default function Chat({ projectId, log, running, assets, initialDraft, on
               const info = assets.find((x) => x.name === a);
               return (
                 <span key={a} className="chip mo-attach-chip">
+                  {/* a b-roll clip: a small preview once it is converted */}
+                  {info?.kind === "video" && info.state !== "converting" ? (
+                    <video className="mo-attach-clip" src={motionApi.assetUrl(projectId, a)} preload="metadata" muted playsInline aria-hidden="true" />
+                  ) : null}
                   {a}
-                  {info ? <span className="muted"> {bytesLabel(info.bytes)}</span> : null}
+                  {info?.kind === "video" ? (
+                    <span className="muted"> {info.state === "converting" ? "converting..." : `${(info.seconds ?? 0).toFixed(1)} s`}</span>
+                  ) : info ? (
+                    <span className="muted"> {bytesLabel(info.bytes)}</span>
+                  ) : null}
                   <button type="button" aria-label={`Remove ${a}`} onClick={() => setAttachments((x) => x.filter((n) => n !== a))}>
                     ×
                   </button>
@@ -371,7 +379,7 @@ export default function Chat({ projectId, log, running, assets, initialDraft, on
         {error ? <div className="error small">{error}</div> : null}
         {blocked ? <div className="banner banner-warn small">{blocked}</div> : null}
         <div className="mo-input-row">
-          <button type="button" className="btn mo-attach" onClick={() => fileRef.current?.click()} disabled={uploading} title="Attach images, a PDF, a text file or audio">
+          <button type="button" className="btn mo-attach" onClick={() => fileRef.current?.click()} disabled={uploading} title="Attach images, a video clip (b-roll), a PDF, a text file or audio">
             {uploading ? <span className="spinner" /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 6.5 8.4 14.6a2 2 0 0 0 2.8 2.8l8.1-8.1a4 4 0 0 0-5.6-5.6l-8.4 8.4a6 6 0 0 0 8.5 8.5l7.4-7.4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg>}
           </button>
           <input
@@ -379,7 +387,7 @@ export default function Chat({ projectId, log, running, assets, initialDraft, on
             type="file"
             multiple
             hidden
-            accept="image/*,audio/*,.pdf,.txt,.md,.csv,.json,.srt,.vtt,.svg,.woff,.woff2,.ttf,.otf"
+            accept="image/*,audio/*,video/*,.mp4,.mov,.webm,.mkv,.m4v,.pdf,.txt,.md,.csv,.json,.srt,.vtt,.svg,.woff,.woff2,.ttf,.otf,.excalidraw"
             onChange={(e) => {
               void upload(Array.from(e.target.files ?? []));
               e.target.value = "";

@@ -21,6 +21,11 @@ declare global {
       load: (b: Bundle) => Promise<{ duration: number; errors: string[]; version: number }>;
       seek: (t: number) => void;
       seekScene: (id: string, local: number) => void;
+      /** seekScene for the export: whether the frame may differ from the one this page showed before (false
+       *  only when the page is exactly as it was, so the export reuses that frame); fresh starts a new run */
+      seekFrame: (id: string, local: number, fresh: boolean) => boolean | Promise<boolean>;
+      /** resolves once the page shows the moment last seeked to (a b-roll clip has found its frame) */
+      settle: () => Promise<void>;
       diagnose: Runtime["diagnose"];
       sfx: Runtime["sfx"];
       /** the audit's timing report for one scene: {gaps, late} (see Runtime.timing) */
@@ -29,11 +34,27 @@ declare global {
   }
 }
 
+// the page's state at the frame before, for seekFrame (one run of frames per page at a time)
+let lastFrame: string | null = null;
+
 window.MotionPlayer = {
   ready: true,
   load: (b) => runtime.load(b),
   seek: (t) => runtime.seek(t),
   seekScene: (id, local) => runtime.seekScene(id, local),
+  seekFrame: (id, local, fresh) => {
+    runtime.seekScene(id, local);
+    const compare = () => {
+      const state = runtime.frameState();
+      const same = !fresh && state !== null && state === lastFrame;
+      lastFrame = state;
+      return !same;
+    };
+    // a page with a b-roll clip answers once the clip shows the right frame
+    const wait = runtime.settled();
+    return wait ? wait.then(compare) : compare();
+  },
+  settle: () => runtime.settled() ?? Promise.resolve(),
   diagnose: (id, local) => runtime.diagnose(id, local),
   sfx: () => runtime.sfx(),
   timing: (id) => runtime.timing(id),
