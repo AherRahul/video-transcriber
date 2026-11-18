@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } 
 
 import { downloadUrl, getHealth, getJob, startJob, type Frames, type Health, type Job } from "./api";
 import { clock, linkAt, paragraphs, plainText, SOURCE_HINT, SOURCE_LABEL } from "./format";
-import { motionApi, saveDraft } from "./motion/api";
 import MotionApp from "./motion/MotionApp";
+import NewVideoDialog, { type NewVideoSource } from "./motion/NewVideoDialog";
 import PromptPanel from "./PromptPanel";
 import ScreenshotsView, { useFrames } from "./Screenshots";
 
@@ -270,45 +270,22 @@ function TranscriptView({ job, frames }: { job: Job; frames: Frames | null }) {
   const [timestamps, setTimestamps] = useState(true);
   const [query, setQuery] = useState("");
   const [copied, setCopied] = useState(false);
-  const [making, setMaking] = useState(false);
+  // the new-video dialog: where the video goes, its playlist or course and episode, the tone, the length
+  // and the user's notes are chosen before the video exists, and the first message is written from them
+  const [newVideo, setNewVideo] = useState<NewVideoSource | null>(null);
   const copyTimer = useRef<number | undefined>(undefined);
 
-  /** A new Motion video with this transcript attached (and its screenshots as layout references, when it has
-   *  them), and a first message ready to send. */
-  async function makeVideo() {
+  /** Opens the new-video dialog with this transcript as the reference (and its screenshots as layout
+   *  references, when they are ready: copied in as ref-<mm>m<ss>s.jpg for Claude to look at). */
+  function makeVideo() {
     const shotsReady = frames?.state === "done" && frames.items.length > 0;
-    const shotsComing = frames?.state === "running" || frames?.state === "waiting";
-    if (shotsComing && !window.confirm("The screenshots are still being taken, so they won't go with this video. Make it now without them?")) return;
-    setMaking(true);
-    try {
-      // the daily films' look and voice, as long as the source (the transcript's own length)
-      const { project, attachments, references } = await motionApi.createProject({
-        title: t.title,
-        sourceText: plainText(t, true),
-        sourceTitle: t.title,
-        sourceUrl: t.url,
-        brandKitId: "algoinsight-paper",
-        aspect: "16:9",
-        // the daily films run 10 to 30 minutes: a shorter source still makes a 10 minute film
-        targetSeconds: t.duration ? Math.min(1800, Math.max(600, t.duration)) : undefined,
-        // the screenshots are copied in as ref-<mm>m<ss>s.jpg with docs/REFERENCES.md, for Claude to look at
-        framesJob: shotsReady ? job.id : undefined,
-      });
-      const refsNote = references
-        ? " Before you design each part, look at the source's screenshots for it (view_references), then design our own pages in the paper look."
-        : "";
-      saveDraft(project.id, {
-        text:
-          "Make a narrated explainer in our daily paper look from the attached transcript. Teach every point it covers, but build our own version: our own running story and examples, our own sentences, a systematic order, simple and easy English in a warm human voice, every fact checked in FACTS.md. The script first, then every scene, then the YouTube details." +
-          refsNote,
-        attachments,
-      });
-      window.location.hash = `#/motion/${project.id}`;
-    } catch (err) {
-      window.alert(err instanceof Error ? err.message : String(err));
-    } finally {
-      setMaking(false);
-    }
+    setNewVideo({
+      title: t.title,
+      url: t.url,
+      text: plainText(t, true),
+      framesJob: shotsReady ? job.id : undefined,
+      shotsComing: frames?.state === "running" || frames?.state === "waiting",
+    });
   }
 
   const paras = useMemo(() => paragraphs(t), [t]);
@@ -361,18 +338,20 @@ function TranscriptView({ job, frames }: { job: Job; frames: Frames | null }) {
           <button
             type="button"
             className="btn"
-            onClick={() => void makeVideo()}
-            disabled={making}
+            onClick={makeVideo}
             title={
               frames?.state === "done" && frames.items.length
                 ? "Start a Motion video with this transcript and its screenshots attached"
                 : "Start a Motion video with this transcript attached"
             }
           >
-            {making ? "Opening…" : "Make a Motion video"}
+            Make a Motion video
           </button>
         </div>
       </div>
+      {newVideo ? (
+        <NewVideoDialog source={newVideo} onClose={() => setNewVideo(null)} onCreated={(id) => (window.location.hash = `#/motion/${id}`)} />
+      ) : null}
 
       <div className="toolbar">
         <input

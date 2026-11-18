@@ -1,0 +1,47 @@
+{
+ "style": "toon",
+ "note": "Our own cartoon cast, drawn by the player's rig (frontend/src/motion/player/kit/toon.ts): one figure and outfit for everyone, only the hair, accessories and colours differ. Edit a person's spec here; the player draws them from it.",
+ "poses": ["rest", "wave", "point", "explain", "think", "shrug", "hips", "phone"],
+ "faces": ["smile", "talk", "happy", "surprised", "worried", "thinking", "confident", "sad"],
+ "aliases": {
+  "poses": { "ease": "rest", "arms": "hips", "suit": "rest", "shirt": "rest", "reach": "explain", "sit": "rest", "kneel": "rest", "stand": "rest" },
+  "faces": {
+   "Calm": "smile", "Smile": "smile", "SmileNM": "smile", "SmileBig": "happy", "SmileTeeth": "happy", "SmileLol": "happy", "LoveGrinTeeth": "happy",
+   "Explaining": "talk", "Concerned": "worried", "Fear": "worried", "Rage": "worried", "VeryAngry": "worried", "Serious": "confident",
+   "Contempt": "confident", "Cheeky": "confident", "Driven": "confident", "Hectic": "surprised", "Awe": "surprised", "Tired": "sad",
+   "Solemn": "sad", "Suspicious": "thinking", "OldAged": "smile", "EyesClosed": "smile"
+  }
+ },
+ "people": {
+  "meera": {
+   "label": "Meera",
+   "desc": "a backend engineer in her twenties, curious and practical (the usual running example)",
+   "spec": { "skin": "#f6c9a8", "hair": "#2b1a14", "hairStyle": "long", "lashes": true, "earrings": true, "jacket": "#e9773f", "cuff": "#c95f2c", "tee": "#ffffff", "pants": "#3d5a80", "shoes": "#2b2d42" }
+  },
+  "kavya": {
+   "label": "Kavya",
+   "desc": "a student preparing for interviews, asks the questions viewers ask",
+   "spec": { "skin": "#f8d0b0", "hair": "#3a2418", "hairStyle": "pony", "glasses": true, "lashes": true, "jacket": "#5b7fd1", "cuff": "#4566b5", "tee": "#ffd166", "pants": "#2b2d42", "shoes": "#ffffff" }
+  },
+  "kabir": {
+   "label": "Kabir",
+   "desc": "a startup developer who ships fast and learns from what breaks",
+   "spec": { "skin": "#f1bf97", "hair": "#241612", "hairStyle": "short", "beard": true, "jacket": "#2a9d8f", "cuff": "#1f7a6f", "tee": "#f4f1de", "pants": "#264653", "shoes": "#e76f51" }
+  },
+  "ishaan": {
+   "label": "Ishaan",
+   "desc": "a fresher in his first job, eager and a little lost",
+   "spec": { "skin": "#f3c6a2", "hair": "#2a1a12", "hairStyle": "curly", "jacket": "#e0a526", "cuff": "#c08a17", "tee": "#ffffff", "pants": "#344e41", "shoes": "#2b2d42" }
+  },
+  "arjun": {
+   "label": "Arjun",
+   "desc": "a senior engineer and interviewer, calm and exact",
+   "spec": { "skin": "#eebb94", "hair": "#262626", "hairStyle": "short", "glasses": true, "beard": true, "jacket": "#3d4451", "cuff": "#2f3540", "tee": "#a8dadc", "pants": "#22223b", "shoes": "#6c757d" }
+  },
+  "priya": {
+   "label": "Priya",
+   "desc": "a product manager who asks what the user gets out of it",
+   "spec": { "skin": "#f7cfae", "hair": "#2c1810", "hairStyle": "bun", "lashes": true, "earrings": true, "jacket": "#c2416b", "cuff": "#a3335a", "tee": "#fef3c7", "pants": "#3d405b", "shoes": "#e5e5e5" }
+  }
+ }
+}

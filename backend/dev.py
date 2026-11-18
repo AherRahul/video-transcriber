@@ -31,7 +31,7 @@ SKIP_DIRS = {".venv", "__pycache__", "node_modules"}
 POLL_SECONDS = 0.6
 PORT = os.environ.get("TRANSCRIBER_PORT", "8765")  # app.py reads the same variable
 BUSY_URL = f"http://127.0.0.1:{PORT}/api/busy"
-NAMES = {"transcriptions": "transcription", "exports": "export", "voice": "voice job", "claude": "Claude turn"}
+NAMES = {"transcriptions": "transcription", "exports": "export", "voice": "voice job", "claude": "Claude turn", "clips": "clip conversion"}
 
 
 def snapshot() -> dict[str, float]:

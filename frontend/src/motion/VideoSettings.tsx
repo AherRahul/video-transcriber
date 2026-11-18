@@ -1,6 +1,8 @@
 // The video's own settings, in the top bar's "Video" menu: who the film is made for (YouTube or Udemy),
 // what frames and ends it (the logo card and web address on every page, the AlgoInsight promo before
-// the end, the end screen) and the length the script aims for.
+// the end, the end screen), a length the user sets (otherwise the topic decides, in Claude's plan), the
+// script's tone (normal, funny, focused, informational), and whether the script waits for the user's own
+// words before any scene code.
 //
 // A Udemy film can't show our website, URL, price or platform (the paper style guide's rule), so Udemy
 // turns all four off; the server enforces it too. The promo is drawn in the paper look only.
@@ -8,7 +10,7 @@
 import { useEffect, useState } from "react";
 
 import { clock } from "./api";
-import { DEFAULT_CLOSING, type Closing, type Destination, type ProjectView } from "./types";
+import { DEFAULT_CLOSING, TONE_OPTIONS, type Closing, type Destination, type ProjectView, type Tone } from "./types";
 
 type Props = {
   view: ProjectView;
@@ -39,7 +41,8 @@ export function closingSummary(view: ProjectView): string {
 
 export default function VideoSettings({ view, disabled, onPatch }: Props) {
   // a click shows at once; the saved project (or the server's refusal) settles it when the reply comes
-  const [shown, setShown] = useState<{ destination?: Destination; closing?: Partial<Closing> } | null>(null);
+  const [shown, setShown] = useState<{ destination?: Destination; closing?: Partial<Closing>; tone?: Tone } | null>(null);
+  const tone: Tone = shown?.tone ?? view.project.tone ?? "normal";
   const destination = shown?.destination ?? destinationOf(view);
   const udemyNow = destination === "udemy";
   const closing = udemyNow ? { logo: false, url: false, promo: false, endscreen: false } : { ...closingOf(view), ...(shown?.closing ?? {}) };
@@ -48,6 +51,8 @@ export default function VideoSettings({ view, disabled, onPatch }: Props) {
   const promoScenes = view.bundle.scenes.filter((s) => s.kind === "promo");
   const promoUnvoiced = promoScenes.filter((s) => s.narration && !s.voiced).length;
   const target = view.project.targetSeconds ?? null;
+  const plan = view.project.plan ?? null;
+  const review = !!view.project.scriptReview;
   const [minutes, setMinutes] = useState(target ? String(Math.round((target / 60) * 10) / 10) : "");
   const [busy, setBusy] = useState(false);
 
@@ -73,6 +78,11 @@ export default function VideoSettings({ view, disabled, onPatch }: Props) {
   const setDestination = (d: Destination) => {
     setShown({ destination: d });
     void run({ destination: d });
+  };
+  // a new tone shapes the next draft; a script already written is rewritten when the user asks Claude
+  const setTone = (t: Tone) => {
+    setShown({ tone: t });
+    void run({ tone: t });
   };
 
   function saveTarget() {
@@ -122,7 +132,7 @@ export default function VideoSettings({ view, disabled, onPatch }: Props) {
 
       <div className="mo-field">
         <span className="label">On every page</span>
-        {row("logo", "AlgoInsight logo card", "Top left, with the tagline under it.")}
+        {row("logo", "AlgoInsight logo card", "Top left on the paper, with the tagline under it; bottom left in other kits.")}
         {row("url", "Web address", "algoinsight.io, bottom right.")}
       </div>
 
@@ -153,9 +163,42 @@ export default function VideoSettings({ view, disabled, onPatch }: Props) {
           onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
         />
         <span className="muted small">
-          The video is {clock(view.bundle.duration)} now{target ? `; Claude aims for about ${clock(target)}` : ""}. A timed transcript sets this on its own; empty means no target.
+          The video is {clock(view.bundle.duration)} now
+          {target ? `; it must land near ${clock(target)}` : plan ? `; Claude planned about ${plan.minutes} min (${plan.lengthWhy})` : ""}. Empty lets the topic decide: Claude
+          picks the length it needs and says why.
         </span>
       </label>
+
+      <div className="mo-field" role="radiogroup" aria-label="Script tone">
+        <span className="label">Script tone</span>
+        {TONE_OPTIONS.map((t) => (
+          <label key={t.id} className={`mo-check-row ${lock ? "off" : ""}`}>
+            <input type="radio" name="mo-tone" checked={tone === t.id} disabled={lock} onChange={() => setTone(t.id)} />
+            <span>
+              <span className="mo-check-title">{t.label}</span>
+              <span className="muted small">{t.hint}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+
+      <div className="mo-field">
+        <span className="label">The script</span>
+        <label className={`mo-check-row ${lock ? "off" : ""}`}>
+          <input type="checkbox" checked={review} disabled={lock} onChange={(e) => void run({ scriptReview: e.target.checked })} />
+          <span>
+            <span className="mo-check-title">Wait for my words before the scenes</span>
+            <span className="muted small">
+              Claude drafts the script with places for your own story, opinions and numbers, then waits while you rewrite and approve it in Script &gt; Your words.
+            </span>
+          </span>
+        </label>
+        {plan ? (
+          <p className="mo-settings-note">
+            Shape: <b>{plan.shape}</b>, {plan.why}
+          </p>
+        ) : null}
+      </div>
     </div>
   );
 }

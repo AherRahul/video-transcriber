@@ -15,9 +15,10 @@ motion-data/
     renders/              exported MP4s with their captions (.srt, .vtt), the per-scene cache, library
                           posters and the rendered thumbnail (thumbnail-<hash>.jpg)
     voice/<hash>.mp3|json narration clips (content-addressed) with the time of every character
-    docs/<name>.md        documents Claude writes for the user (facts, the YouTube details, notes)
-    source.json           the timed reference transcript the video is built from: its lines are the points
-                          the video must cover (each scene's `covers` names the source times it teaches)
+    docs/<name>.md        documents Claude writes for the user (facts, notes; older videos have a YOUTUBE.md)
+    source.json           a timed reference transcript (another video on the topic): research only, for
+                          what viewers ask and what it gets wrong. It never sets the outline, the order,
+                          the examples or the length, and the script may not copy its wording.
 
 Every write bumps the project's `version`. Each scene also has its own `rev`, so a direct edit made from
 the page is refused (409) when the scene changed underneath it.
@@ -44,6 +45,8 @@ from html import escape as html_escape
 from html.parser import HTMLParser
 from pathlib import Path
 
+from . import kitdata
+from . import publishing as pb
 from . import voice as vc
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -80,13 +83,42 @@ MAX_SCENE_BYTES = 200_000
 MAX_ASSET_BYTES = 60 * 1024 * 1024
 MAX_SNAPSHOTS = 40
 THUMBNAIL_FILE = "thumbnail.html"
-THUMBNAIL_WORDS = 5  # a YouTube thumbnail reads at a glance: three to five very large words
-# A video made from a timed source runs at least 10 and at most 30 minutes (the founder's rule for the daily
-# films), and lands between 90 percent and 150 percent of its target: explaining simply takes a little longer.
-SOURCE_MIN_SECONDS = 10 * 60.0
-SOURCE_MAX_SECONDS = 30 * 60.0
+THUMBNAIL_WORDS = 4  # a YouTube thumbnail reads at a glance: one to four very large words
+# A length the user set lands between 90 percent and 150 percent of it: explaining simply takes a little
+# longer. Nothing else sets a length: a reference video's own length doesn't (each video is as long as its
+# topic needs, and Claude's plan says why).
 LENGTH_LOW, LENGTH_HIGH = 0.9, 1.5
-COPY_RUN_WORDS = 8  # this many of the source's words in a row, in the same order, is copying
+COPY_RUN_WORDS = 8  # this many of the reference's words in a row, in the same order, is copying
+# The shapes a video can take, so each one is built for its topic rather than one template for every
+# video (a channel of look-alike videos reads as mass-produced). Claude names one in its plan with why it
+# fits, and sees the shapes of the user's other videos so the channel doesn't repeat itself.
+SHAPES = {
+    "story": "one real situation followed from start to end; each idea arrives when the story needs it",
+    "problem-first": "starts from a failure, a bug or a hard question and works toward the fix",
+    "build-along": "builds one real thing step by step, with the real code and the real runs",
+    "myth-check": "takes what people believe about the topic and tests each belief against real results",
+    "compare": "two or three options side by side, measured on the same task, ending in a choice",
+    "interview": "one real interview question answered out loud, with the follow-ups an interviewer asks",
+    "deep-dive": "one idea taken apart from the outside in, each layer shown working",
+    "questions": "the real questions learners ask about the topic, answered one by one",
+    "quick-take": "one sharp idea in a few minutes: the point, one example, what to do with it",
+    "paper": "a research paper decoded: the question it asks, what it did, what it found (its own numbers), its limits, what it means",
+    "other": "a shape of its own, described in why",
+}
+# How the narration speaks, picked per video (Video settings); Claude writes the script in it. Every tone
+# keeps simple English and true facts; the prompt's Tone section says what each one asks for.
+TONES = {
+    "normal": "simple, warm English with a little character: an everyday running example, a friendly voice",
+    "funny": "the same ideas explained with light, kind humour: small jokes, playful everyday comparisons, a cheerful feel",
+    "focused": "knowledge-dense and precise in simple English: every sentence teaches, exact mechanisms, numbers and trade-offs",
+    "informational": "research and technical sources decoded in simple English with a calm, normal tone: highly informational",
+}
+DEFAULT_TONE = "normal"
+
+
+def tone_of(p: dict) -> str:
+    """The video's tone (normal for a video made before tones)."""
+    return p.get("tone") if p.get("tone") in TONES else DEFAULT_TONE
 PALETTE_ROLES = ("bg", "surface", "ink", "muted", "accent", "accent2")
 
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
@@ -97,9 +129,14 @@ ASSET_EXT = {
     ".mp3", ".wav", ".m4a", ".aac", ".ogg",  # audio
     ".pdf", ".txt", ".md", ".csv", ".json", ".srt", ".vtt",  # documents
     ".woff", ".woff2", ".ttf", ".otf",  # fonts
+    ".excalidraw",  # the user's own Excalidraw drawings (kit/excalidraw.ts draws them in)
 }
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 AUDIO_EXT = {".mp3", ".wav", ".m4a", ".aac", ".ogg"}
+# b-roll clips (broll.py): an upload is converted to an edit-friendly .mp4 in the background
+VIDEO_EXT = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
+ASSET_EXT |= VIDEO_EXT
+MAX_VIDEO_BYTES = 1024 * 1024 * 1024  # an uploaded clip, before it is converted
 
 
 class StoreError(Exception):
@@ -162,12 +199,11 @@ def write_text(path: Path, text: str) -> None:
     _windows_retry(lambda: os.replace(tmp, path))
 
 
-# ── the reference source: its timed lines, what each scene covers, copying ─────
+# ── the reference: its timed lines (research), copying ─────
 
 _CLOCK = r"(?:\d{1,2}:)?\d{1,3}:\d{2}"
 _SRC_LINE_RE = re.compile(r"^[\[(]?\s*(" + _CLOCK + r")(?:[.,]\d{1,3})?\s*[\])]?\s*[-:]?\s*(.*)$")
 _SRC_CUE_RE = re.compile(r"^(" + _CLOCK + r")(?:[.,]\d{1,3})?\s*-->")
-_COVER_RE = re.compile(r"^\s*(" + _CLOCK + r")\s*(?:(?:-|to)\s*(" + _CLOCK + r"))?\s*$")
 _WORD_RE = re.compile(r"[a-z0-9']+")
 
 
@@ -220,63 +256,39 @@ def parse_source(text: str) -> list[dict]:
     return lines
 
 
-def parse_cover(item) -> tuple[float, float]:
-    """One `covers` entry: a source time ('1:48') or range ('1:40-2:17'), as (start, end) seconds."""
-    m = _COVER_RE.match(str(item))
+def clean_plan(raw) -> dict:
+    """The video's plan: the shape it takes and the length it needs, each with why (both chosen for the topic,
+    never copied from a reference)."""
+    if not isinstance(raw, dict):
+        raise StoreError("plan must be an object: {shape, why, minutes, lengthWhy}.")
+    shape = str(raw.get("shape") or "").strip().lower()
+    if shape not in SHAPES:
+        raise StoreError("plan.shape must be one of " + ", ".join(SHAPES) + ".")
+    why = str(raw.get("why") or "").strip()
+    length_why = str(raw.get("lengthWhy") or "").strip()
+    if not why or not length_why:
+        raise StoreError("plan needs why (why this shape fits the topic) and lengthWhy (why it needs that long).")
     try:
-        if not m:
-            raise ValueError(item)
-        a = clock_seconds(m.group(1))
-        b = clock_seconds(m.group(2)) if m.group(2) else a
-    except ValueError:
-        raise StoreError(f"covers entry {item!r} must be a source time like 1:48 or a range like 1:40-2:17.") from None
-    return (a, b) if a <= b else (b, a)
+        minutes = float(raw.get("minutes"))
+    except (TypeError, ValueError):
+        raise StoreError("plan.minutes must be the length the topic needs, in minutes (like 6 or 18).") from None
+    if not 0.1 <= minutes <= MAX_TOTAL_SECONDS / 60:
+        raise StoreError(f"plan.minutes must be between 0.1 and {MAX_TOTAL_SECONDS / 60:.0f}.")
+    return {"shape": shape, "why": why[:300], "minutes": round(minutes, 1), "lengthWhy": length_why[:300]}
 
 
-def clean_covers(raw) -> list[str]:
-    if isinstance(raw, str):
-        raw = [x for x in re.split(r"[,;]", raw) if x.strip()]
-    if not isinstance(raw, list):
-        raise StoreError("covers must be a list of source times or ranges, like ['1:40-2:17', '2:30'].")
-    out = []
-    for item in raw[:200]:
-        a, b = parse_cover(item)
-        out.append(fmt_clock(a) if a == b else f"{fmt_clock(a)}-{fmt_clock(b)}")
-    return out
-
-
-def clean_skips(raw) -> list[dict]:
-    """Source lines left out on purpose (a greeting, an ad, a plug for their channel), each with why."""
-    if not isinstance(raw, list):
-        raise StoreError("sourceSkips must be a list of {range, reason}.")
-    out = []
-    for item in raw[:100]:
-        if not isinstance(item, dict) or not str(item.get("reason") or "").strip():
-            raise StoreError("Each sourceSkips entry needs a range (like 9:59-10:08) and a reason (why the video leaves it out).")
-        a, b = parse_cover(item.get("range"))
-        out.append({"range": fmt_clock(a) if a == b else f"{fmt_clock(a)}-{fmt_clock(b)}", "reason": str(item["reason"]).strip()[:200]})
-    return out
-
-
-def coverage(lines: list[dict], scenes: list[dict], skips: list[dict]) -> dict:
-    """Which source lines a scene covers (its `covers` ranges hold the line's time), which are skipped on
-    purpose, and which nothing covers yet."""
-    spans = [(a, b, s["id"]) for s in scenes for a, b in (parse_cover(c) for c in s.get("covers") or [])]
-    skip_spans = [parse_cover(k["range"]) for k in skips]
-    covered = skipped = 0
-    missing, by_line = [], []
-    for ln in lines:
-        who = [sid for a, b, sid in spans if a <= ln["t"] <= b]
-        if who:
-            covered += 1
-            by_line.append(who)
-        elif any(a <= ln["t"] <= b for a, b in skip_spans):
-            skipped += 1
-            by_line.append(["skipped"])
-        else:
-            missing.append(ln)
-            by_line.append([])
-    return {"total": len(lines), "covered": covered, "skipped": skipped, "missing": missing, "byLine": by_line}
+def own_words_change(s: dict, sid: str, text: str, replace_own: bool) -> bool:
+    """Claude writing a scene's narration: whether it is still the user's own words afterwards. Words the
+    user rewrote themselves change only when the user asked for it (replace_own); a storyboard or script
+    pass that resends a scene's text unchanged is fine."""
+    same = text == (s.get("narration") or "")
+    if s.get("byUser") and not same and not replace_own:
+        raise StoreError(
+            f"Scene {sid}'s narration is in the user's own words (they rewrote it). Change it only when the user "
+            "asked you to in this conversation, and then send it again with replaceOwnWords: true; otherwise leave "
+            "its narration out."
+        )
+    return bool(s.get("byUser")) and same
 
 
 def _words_of(text: str) -> list[str]:
@@ -371,11 +383,6 @@ def length_window(target: float) -> tuple[float, float]:
     return target * LENGTH_LOW, min(MAX_TOTAL_SECONDS, target * LENGTH_HIGH)
 
 
-def target_from_source(seconds: float) -> float:
-    """A timed source's own length, held to the daily films' 10 to 30 minutes."""
-    return max(SOURCE_MIN_SECONDS, min(SOURCE_MAX_SECONDS, float(seconds)))
-
-
 def is_hex(value) -> bool:
     return isinstance(value, str) and bool(HEX_RE.match(value.strip()))
 
@@ -437,9 +444,74 @@ def asset_kind(name: str) -> str:
         return "image"
     if ext in AUDIO_EXT:
         return "audio"
+    if ext in VIDEO_EXT:
+        return "video"
     if ext in {".woff", ".woff2", ".ttf", ".otf"}:
         return "font"
+    if ext == ".excalidraw":
+        return "drawing"
     return "document"
+
+
+def parse_drawing(data: bytes | str) -> dict:
+    """An Excalidraw file (JSON with an "elements" list), checked: raises StoreError when it isn't one."""
+    try:
+        doc = json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise StoreError("That .excalidraw file isn't valid JSON: save it again from Excalidraw (File > Save to...).") from None
+    if not isinstance(doc, dict) or not isinstance(doc.get("elements"), list):
+        raise StoreError("That .excalidraw file has no drawing in it (no elements list).")
+    return doc
+
+
+def drawing_elements(doc: dict) -> dict:
+    """What an Excalidraw drawing holds, for Claude (read_drawing and the project state): its live elements in
+    drawing order, each with its id, type, the words it shows (a container's bound text counts as its own),
+    its box in the drawing's units, its groups and frame; the drawing's bounds; and every text."""
+    live = [e for e in doc.get("elements") or [] if isinstance(e, dict) and not e.get("isDeleted")]
+    by_id = {e.get("id"): e for e in live}
+    bound: dict[str, str] = {}
+    for e in live:
+        if e.get("type") == "text" and e.get("containerId") in by_id:
+            bound[e["containerId"]] = (e.get("originalText") or e.get("text") or "").strip()
+
+    def box(e: dict) -> tuple[float, float, float, float]:
+        x, y = float(e.get("x") or 0), float(e.get("y") or 0)
+        pts = e.get("points") if isinstance(e.get("points"), list) else None
+        if pts and e.get("type") in ("line", "arrow", "freedraw"):
+            xs = [float(p[0]) for p in pts if isinstance(p, list) and len(p) >= 2]
+            ys = [float(p[1]) for p in pts if isinstance(p, list) and len(p) >= 2]
+            if xs and ys:
+                return x + min(xs), y + min(ys), max(xs) - min(xs), max(ys) - min(ys)
+        return x, y, float(e.get("width") or 0), float(e.get("height") or 0)
+
+    items, boxes = [], []
+    for e in live:
+        b = box(e)
+        boxes.append(b)
+        text = (e.get("originalText") or e.get("text") or "").strip() if e.get("type") == "text" else bound.get(e.get("id"), "")
+        items.append(
+            {
+                "id": e.get("id"),
+                "type": e.get("type"),
+                "text": text,
+                "box": [round(v, 1) for v in b],
+                "groups": [g for g in e.get("groupIds") or [] if isinstance(g, str)],
+                "frame": e.get("frameId"),
+                "container": e.get("containerId") if e.get("type") == "text" else None,
+                "name": e.get("name") if e.get("type") in ("frame", "magicframe") else None,
+            }
+        )
+    if boxes:
+        x0 = min(b[0] for b in boxes)
+        y0 = min(b[1] for b in boxes)
+        x1 = max(b[0] + b[2] for b in boxes)
+        y1 = max(b[1] + b[3] for b in boxes)
+        bounds = [round(x0, 1), round(y0, 1), round(x1 - x0, 1), round(y1 - y0, 1)]
+    else:
+        bounds = [0, 0, 0, 0]
+    texts = [i["text"] for i in items if i["type"] == "text" and i["text"]]
+    return {"elements": items, "bounds": bounds, "texts": texts, "files": len(doc.get("files") or {})}
 
 
 # ── scene checks (warnings returned to Claude after a write) ──────────────────────
@@ -453,9 +525,10 @@ class _SceneScan(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.ids: list[str] = []
-        self.stack: list[tuple[str, bool]] = []  # (tag, has a data-id here or above)
+        self.stack: list[tuple[str, bool, bool]] = []  # (tag, has a data-id here or above, inside a data-badge)
         self.unlabelled: list[str] = []
         self.words = 0
+        self.badge_words = 0  # words inside a data-badge (a thumbnail's episode badge), counted apart
         self._skip = 0  # inside <style> or <script>
 
     def handle_starttag(self, tag, attrs):
@@ -470,7 +543,8 @@ class _SceneScan(HTMLParser):
         if tag == "img" and not did and not inherited:
             self.unlabelled.append("<img>")
         if tag not in ("img", "br", "hr", "input", "path", "circle", "rect", "line", "polyline", "polygon", "ellipse", "stop", "use"):
-            self.stack.append((tag, inherited))
+            badge = "data-badge" in a or (self.stack[-1][2] if self.stack else False)
+            self.stack.append((tag, inherited, badge))
 
     def handle_endtag(self, tag):
         if tag in ("style", "script"):
@@ -487,7 +561,10 @@ class _SceneScan(HTMLParser):
         text = data.strip()
         if not text:
             return
-        self.words += len(HOLE_RE.sub("x", text).split())
+        n = len(HOLE_RE.sub("x", text).split())
+        self.words += n
+        if self.stack and self.stack[-1][2]:
+            self.badge_words += n
         if self.stack and not self.stack[-1][1]:
             self.unlabelled.append(f"<{self.stack[-1][0]}> \"{text[:30]}\"")
 
@@ -544,6 +621,7 @@ def check_scene(source: str, props: dict) -> list[str]:
         warnings.append(f"About {scan.words + prop_words} words of text in this scene: keep each moment to 12 words or fewer.")
     if "<script" not in source:
         warnings.append("No <script>: nothing animates in this scene.")
+    warnings += kitdata.unknown_names(source)  # an icon or logo the explainer kit doesn't have
     return warnings
 
 
@@ -559,9 +637,23 @@ def check_thumbnail(source: str, props: dict) -> list[str]:
         scan.close()
     except Exception:  # noqa: BLE001 - check_scene has already reported a markup problem
         pass
-    if scan.words > THUMBNAIL_WORDS:
-        warnings.append(f"About {scan.words} words on the thumbnail: keep it to 3 to 5 very large words.")
+    words = scan.words - scan.badge_words  # the episode badge (data-badge) is the series' mark, not the message
+    if words > THUMBNAIL_WORDS:
+        warnings.append(f"About {words} words on the thumbnail: keep it to 1 to {THUMBNAIL_WORDS} very large words that add to the title.")
     return warnings
+
+
+def thumbnail_colour_warnings(stats: dict) -> list[str]:
+    """What the colour check (render.thumbnail_feed) says about a thumbnail in YouTube's feed: mostly pale
+    (graph paper, white) blends into the white page; too little that is dark or strongly coloured doesn't
+    stand out on either page."""
+    pale, bold = float(stats.get("pale") or 0), float(stats.get("dark") or 0) + float(stats.get("vivid") or 0)
+    out = []
+    if pale > 0.5:
+        out.append(f"{round(pale * 100)}% of the thumbnail is pale (paper or white): it blends into YouTube's white page. Put a dark or saturated field behind at least half of it.")
+    if bold < 0.35:
+        out.append(f"Only {round(bold * 100)}% of it is dark or strongly coloured: give it a bold colour field and a bigger hero so it stands out in the feed.")
+    return out
 
 
 # ── the store ──────────────────────────────────────────────────────────────────
@@ -576,6 +668,8 @@ class Store:
         self.kits_dir.mkdir(parents=True, exist_ok=True)
         self._locks: dict[str, threading.RLock] = defaultdict(threading.RLock)
         self._locks_guard = threading.Lock()
+        # the YouTube playlists and Udemy courses the videos are arranged in (collections.json)
+        self.collections = pb.Collections(self.root)
         self._seed_kits()
 
     def lock(self, key: str) -> threading.RLock:
@@ -759,6 +853,9 @@ class Store:
             if not p:
                 continue
             total = sum(s["duration"] for s in p["scenes"])
+            renders = folder / "renders"
+            exported = renders.exists() and any(".part" not in f.name and ".audio" not in f.name for f in renders.glob("*.mp4"))
+            details = p.get("details") or {}
             out.append(
                 {
                     "id": p["id"],
@@ -770,6 +867,13 @@ class Store:
                     "createdAt": p["createdAt"],
                     "updatedAt": p["updatedAt"],
                     "brandKitId": p.get("brandKitId"),
+                    # where it goes and how far it has got (the library groups and tags by these)
+                    "destination": destination_of(p),
+                    "tone": tone_of(p),
+                    "collection": p.get("collection"),
+                    "status": p.get("status") or {},
+                    "progress": self.progress(p, exported),
+                    "details": {k: bool(details.get(k)) for k in DESTINATIONS},
                 }
             )
         out.sort(key=lambda x: x["updatedAt"], reverse=True)
@@ -782,7 +886,14 @@ class Store:
         brand_kit_id: str | None = None,
         settings: dict | None = None,
         target_seconds: float | None = None,
+        tone: str | None = None,
+        destination: str | None = None,
+        collection: dict | None = None,
+        script_review: bool | None = None,
     ) -> dict:
+        """A new video. What the user chose before making it (the new-video dialog): where it goes (YouTube or
+        Udemy, and which playlist or course, at which episode and in which Udemy section), the tone, the
+        length, and whether Claude waits for their own words before building scenes."""
         pid = uuid.uuid4().hex[:12]
         if aspect not in ASPECTS:
             aspect = DEFAULT_ASPECT
@@ -809,6 +920,11 @@ class Store:
             "audio": None,
             "settings": {"model": None, "effort": None, "engine": None, **(settings or {})},
             "targetSeconds": round(float(target_seconds), 1) if target_seconds else None,
+            # a narrated script waits for the user's own words before any scene code (Video settings turns it
+            # off); `script.approved` is set when they approve it
+            "scriptReview": True if script_review is None else bool(script_review),
+            "script": {"approved": False},
+            "tone": tone if tone in TONES else DEFAULT_TONE,
             "pronunciations": [dict(p) for p in DEFAULT_PRONUNCIATIONS],
             "voice": json.loads(json.dumps(vc.VOICE)),
             "scenes": [],
@@ -816,10 +932,18 @@ class Store:
             "createdAt": now(),
             "updatedAt": now(),
         }
+        if destination == "udemy":
+            project["destination"] = "udemy"
+            project["closing"] = {k: False for k in CLOSING_KEYS}
+        if collection:
+            # a playlist or course decides the destination (a Udemy course: no logo, web address or end screen)
+            self._place(project, collection)
         folder = self.projects_dir / pid
         (folder / "scenes").mkdir(parents=True)
         (folder / "assets").mkdir()
         write_json(folder / "project.json", project)
+        if project.get("collection"):
+            project["collection"]["order"] = self._renumber(project["collection"]["id"], moved=pid).get(pid, project["collection"]["order"])
         return project
 
     def get_project(self, pid: str) -> dict:
@@ -883,7 +1007,10 @@ class Store:
                 s["duration"] = round(math.ceil(total * FPS - 1e-6) / FPS, 3)
 
     def delete_project(self, pid: str) -> None:
+        cid = ((read_json(self._dir(pid) / "project.json") or {}).get("collection") or {}).get("id")
         shutil.rmtree(self._dir(pid))
+        if cid:
+            self._renumber(cid)  # the episodes after it move up one
 
     def update_project(self, pid: str, fields: dict, base_version: int | None = None) -> dict:
         """Title, aspect, brand kit, soundtrack or Claude settings, from the page or from Claude."""
@@ -891,6 +1018,7 @@ class Store:
             p = self.get_project(pid)
             if base_version is not None and base_version != p["version"]:
                 raise StoreError("The video changed in the meantime. Reload and try again.", 409)
+            old_cid = (p.get("collection") or {}).get("id")
             if "title" in fields:
                 p["title"] = str(fields["title"] or "Untitled video").strip()[:120]
             if "aspect" in fields:
@@ -907,6 +1035,12 @@ class Store:
             if "targetSeconds" in fields:
                 v = fields["targetSeconds"]
                 p["targetSeconds"] = round(max(10.0, min(MAX_TOTAL_SECONDS, float(v))), 1) if v else None
+            if "scriptReview" in fields:
+                p["scriptReview"] = bool(fields["scriptReview"])
+            if "tone" in fields:
+                if fields["tone"] not in TONES:
+                    raise StoreError("tone must be one of " + ", ".join(TONES))
+                p["tone"] = fields["tone"]
             if "pronunciations" in fields:
                 p["pronunciations"] = _clean_pronunciations(fields["pronunciations"])
             if "audio" in fields:
@@ -937,10 +1071,34 @@ class Store:
                     if k in c:
                         current[k] = bool(c[k])
                 p["closing"] = current
-            if any(k in fields for k in ("destination", "closing", "brandKitId")):
+            if "collection" in fields:
+                # {id, order?, section?} puts it in a playlist or course (the end of it unless an episode number is
+                # given); null takes it out
+                if fields["collection"]:
+                    self._place(p, fields["collection"])
+                else:
+                    p["collection"] = None
+            if "status" in fields:
+                p["status"] = self._status_change(p, fields["status"])
+            if "details" in fields:
+                # the user's own edits on the Details page: merged into what is there, platform by platform
+                d = fields["details"]
+                if not isinstance(d, dict):
+                    raise StoreError("details must be an object like {youtube: {...}, udemy: {...}}")
+                p["details"] = self._merge_details(p, d.get("youtube"), d.get("udemy"), replace=False)
+            if any(k in fields for k in ("destination", "closing", "brandKitId", "collection")):
                 self._apply_closing(pid, p)
                 self._check_total(pid, p)
-            return self._save(pid, p)
+            saved = self._save(pid, p)
+        if "collection" in fields:
+            # the episode numbers close up where it left and make room where it went (outside this video's lock:
+            # renumbering takes each other video's own)
+            new_cid = (saved.get("collection") or {}).get("id")
+            if old_cid and old_cid != new_cid:
+                self._renumber(old_cid)
+            if new_cid:
+                saved["collection"]["order"] = self._renumber(new_cid, moved=pid).get(pid, saved["collection"]["order"])
+        return saved
 
     # ── scenes ──
 
@@ -973,11 +1131,13 @@ class Store:
         aspect: str | None = None,
         brief: dict | None = None,
         target_minutes=None,
-        source_skips=None,
+        plan=None,
+        replace_own_words: bool = False,
     ) -> tuple[dict, list[str]]:
         """Sets the ordered scene list. Scenes that keep their id keep their code; dropped scenes are deleted.
-        target_minutes changes the length to aim for (only when the user asked for one); source_skips lists
-        the source lines left out on purpose."""
+        target_minutes changes the length to aim for (only when the user asked for one); plan is the shape
+        and length chosen for the topic. A scene's narration in the user's own words changes only with
+        replace_own_words."""
         with self.lock(pid):
             p = self.get_project(pid)
             if not isinstance(scenes, list) or not scenes:
@@ -1005,6 +1165,8 @@ class Store:
                     transition = "fade"
                 prev = old.get(sid, {})
                 kind = raw.get("kind") if raw.get("kind") in SCENE_KINDS else prev.get("kind", "scene")
+                narration = str(raw.get("narration") or "")[:6000] if "narration" in raw else prev.get("narration", "")
+                own = own_words_change(prev, sid, narration, replace_own_words)
                 entry = {
                     **(prev or {"props": {}, "levers": [], "rev": 0, "status": "planned"}),
                     "id": sid,
@@ -1016,8 +1178,8 @@ class Store:
                     "transition": transition,
                     "label": str(raw.get("label", prev.get("label", "")) or "")[:80],
                     "part": str(raw.get("part", prev.get("part", "")) or "")[:60],
-                    "narration": str(raw.get("narration", prev.get("narration", "")) or "")[:6000],
-                    "covers": clean_covers(raw["covers"]) if raw.get("covers") is not None else prev.get("covers", []),
+                    "narration": narration,
+                    "byUser": own,
                 }
                 new_list.append(entry)
             if not new_list:
@@ -1058,8 +1220,8 @@ class Store:
                 except (TypeError, ValueError):
                     raise StoreError("targetMinutes must be a number of minutes, like 0.75 or 12.") from None
                 p["targetSeconds"] = round(max(10.0, min(MAX_TOTAL_SECONDS, minutes * 60)), 1) if minutes > 0 else None
-            if source_skips is not None:
-                p["sourceSkips"] = clean_skips(source_skips)
+            if plan is not None:
+                p["plan"] = clean_plan(plan)
             return self._save(pid, p), notes
 
     def write_scene(
@@ -1080,6 +1242,9 @@ class Store:
             if len(source.encode("utf-8")) > MAX_SCENE_BYTES:
                 raise StoreError(f"The scene is larger than {MAX_SCENE_BYTES // 1000} KB; split it or simplify it.")
             props = props if isinstance(props, dict) else s.get("props", {})
+            if text and isinstance(text.get("narration"), str):
+                # before the file is written: words the user rewrote are theirs, and a refusal saves nothing
+                s["byUser"] = own_words_change(s, sid, text["narration"][:6000], bool(text.get("replaceOwnWords")))
             write_text(self._dir(pid) / s["file"], source)
             s["props"] = _clean_props(props)
             for key in ("narration", "label", "part"):
@@ -1176,7 +1341,12 @@ class Store:
                 if not isinstance(fields["props"], dict):
                     raise StoreError("props must be an object")
                 s["props"] = _clean_props(fields["props"])
-            for key, limit in (("narration", 6000), ("label", 80), ("part", 60)):
+            if "narration" in fields:
+                text = str(fields["narration"] or "")[:6000]
+                if text != s.get("narration", ""):
+                    s["byUser"] = True  # the user's own words: Claude changes them only when asked
+                s["narration"] = text
+            for key, limit in (("label", 80), ("part", 60)):
                 if key in fields:
                     s[key] = str(fields[key] or "")[:limit]
             if "hold" in fields:
@@ -1224,8 +1394,9 @@ class Store:
             warnings.append(f"{', '.join(shown)} {'is a screenshot' if len(shown) == 1 else 'are screenshots'} of the source: a layout reference to look at, never to show. Remove it and draw your own page.")
         return warnings
 
-    def write_script(self, pid: str, entries: list[dict], source_skips=None) -> tuple[dict, list[str]]:
-        """Narration (and label, part, covers) for many scenes at once: the script, before the scenes' code."""
+    def write_script(self, pid: str, entries: list[dict], replace_own_words: bool = False) -> tuple[dict, list[str]]:
+        """Narration (and label, part) for many scenes at once: the script, before the scenes' code. A scene's
+        narration in the user's own words changes only with replace_own_words."""
         with self.lock(pid):
             p = self.get_project(pid)
             if not isinstance(entries, list) or not entries:
@@ -1233,16 +1404,16 @@ class Store:
             notes = []
             for e in entries:
                 s = self._find(p, str(e.get("id")))
-                for key, limit in (("narration", 6000), ("label", 80), ("part", 60)):
+                if isinstance(e.get("narration"), str):
+                    text = e["narration"][:6000]
+                    s["byUser"] = own_words_change(s, s["id"], text, replace_own_words)
+                    s["narration"] = text
+                for key, limit in (("label", 80), ("part", 60)):
                     if isinstance(e.get(key), str):
                         s[key] = e[key][:limit]
-                if e.get("covers") is not None:
-                    s["covers"] = clean_covers(e["covers"])
                 s["rev"] = int(s.get("rev", 0)) + 1
                 for w in vc.check_narration(s.get("narration", "")):
                     notes.append(f"{s['id']}: {w}")
-            if source_skips is not None:
-                p["sourceSkips"] = clean_skips(source_skips)
             self._check_total(pid, p)
             return self._save(pid, p), notes
 
@@ -1304,7 +1475,7 @@ class Store:
                 s = {
                     "id": t["id"], "kind": "promo", "name": t["name"], "idea": t["idea"], "file": f"scenes/{t['id']}.html",
                     "duration": 10.0, "transition": t["transition"], "label": t["label"], "part": tpl["part"], "narration": t["narration"],
-                    "covers": [], "props": {}, "levers": [], "rev": 1, "status": "written", "promoVersion": tpl["version"],
+                    "props": {}, "levers": [], "rev": 1, "status": "written", "promoVersion": tpl["version"],
                 }
             out.append(s)
         # the voice must say the promo's short forms right; an entry the user already has wins
@@ -1335,7 +1506,7 @@ class Store:
                     end = {
                         "id": eid, "kind": "endscreen", "name": "End screen", "idea": "The end screen", "file": f"scenes/{eid}.html",
                         "duration": 18.0, "transition": "tear" if paper else "fade", "label": "", "part": "", "narration": "",
-                        "covers": [], "props": {}, "levers": [], "rev": 1, "status": "written",
+                        "props": {}, "levers": [], "rev": 1, "status": "written",
                     }
                 tail.append(end)
         keep = {s["id"] for s in tail}
@@ -1367,10 +1538,11 @@ class Store:
             raise StoreError("No such document.", 404)
         return f.read_text(encoding="utf-8")
 
-    # ── the reference source and the plan's review ──
+    # ── the reference and the script's review ──
 
     def set_source(self, pid: str, name: str, text: str) -> dict | None:
-        """Keeps a timed transcript's lines as the points this video must cover. None when it has no times."""
+        """Keeps a timed transcript's lines as this video's reference: research only (what viewers ask, what it
+        gets wrong), and the wording the script may not copy. None when it has no times."""
         lines = parse_source(text)
         if len(lines) < 3:
             return None
@@ -1409,61 +1581,133 @@ class Store:
         return {r["asset"] for r in p.get("references") or [] if isinstance(r, dict) and r.get("asset")}
 
     def plan_review(self, pid: str, p: dict | None = None) -> dict:
-        """Where the script stands against its target and source: the length, which source lines no scene
-        covers, and narration that repeats the source word for word. Claude may write scene code only when
-        `problems` is empty, so a build never starts from a short, partial or copied script."""
+        """Where the script stands before any scene code:
+        - the plan: a narrated video that waits for the user's words names its shape and length first, both
+          chosen for its topic;
+        - a length the user set: the video lands between 90 and 150 percent of it (nothing else sets one);
+        - the reference: the narration may not repeat it word for word (a reference is research only).
+        Claude may write scene code only when `problems` is empty and, when the script waits for the user's
+        own words (`waiting`, see script_state), only after they approve it."""
         p = p or self.get_project(pid)
         self._derive(pid, p)
-        # the length the target is about: the video's own scenes, without the promo and the end screen
-        total = sum(s["duration"] for s in p["scenes"] if s.get("kind") not in CLOSING_KINDS)
+        # the length is about the video's own scenes, without the promo and the end screen
+        own = [s for s in p["scenes"] if s.get("kind") not in CLOSING_KINDS]
+        total = sum(s["duration"] for s in own)
+        narrated = [s for s in own if (s.get("narration") or "").strip()]
         problems: list[str] = []
-        out: dict = {"total": total, "window": None, "coverage": None, "copied": {}, "problems": problems}
+        out: dict = {"total": total, "window": None, "copied": {}, "problems": problems, "waiting": None}
+        if p.get("scriptReview") and narrated and not p.get("plan"):
+            problems.append(
+                "Choose this video's shape and length for its topic first: write_storyboard with plan {shape, why, minutes, lengthWhy}. "
+                "The project state lists the shapes of the user's other videos; don't repeat the latest ones unless this topic needs it."
+            )
         target = p.get("targetSeconds")
         if target:
             lo, hi = length_window(target)
             out["window"] = (lo, hi)
             if total < lo - 0.5:
-                more = int(math.ceil((lo - total) * vc.WORDS_PER_SECOND / 10.0) * 10)
                 problems.append(
-                    f"The video is {fmt_clock(total)} but must run at least {fmt_clock(lo)} (target {fmt_clock(target)}). "
-                    f"The script needs about {more:,} more spoken words: explain each idea more slowly and fully, add worked examples, add scenes."
+                    f"The video is {fmt_clock(total)} but the length the user set ({fmt_clock(target)}) needs at least {fmt_clock(lo)}. "
+                    "Add what the topic is still missing (a real example, a real run, a step the viewer needs); never pad."
                 )
             elif total > hi + 0.5:
-                problems.append(f"The video is {fmt_clock(total)} but may run at most {fmt_clock(hi)} (target {fmt_clock(target)}). Tighten the script.")
+                problems.append(f"The video is {fmt_clock(total)} but the length the user set ({fmt_clock(target)}) allows at most {fmt_clock(hi)}. Tighten the script.")
         src = self.get_source(pid)
         if src:
-            # a short (a reel from a long talk) can't cover every point; anything from 5 minutes up must
-            if (target or 0) >= 300:
-                cov = coverage(src["lines"], p["scenes"], p.get("sourceSkips") or [])
-                out["coverage"] = cov
-                if cov["missing"]:
-                    shown = "; ".join(f"[{fmt_clock(ln['t'])}] {ln['text'][:90]}" for ln in cov["missing"][:12])
-                    problems.append(
-                        f"{len(cov['missing'])} of the source's {cov['total']} timed lines are in no scene's covers and not in sourceSkips: {shown}"
-                        + (" ..." if len(cov["missing"]) > 12 else "")
-                        + ". Teach each point in a scene (and list its time in that scene's covers), or skip it with a reason if it teaches nothing."
-                    )
             grams = source_grams(src["lines"])
-            for s in p["scenes"]:
-                if s.get("kind") not in CLOSING_KINDS and (s.get("narration") or "").strip():
-                    phrases = copied_phrases(s["narration"], grams)
-                    if phrases:
-                        out["copied"][s["id"]] = phrases
+            for s in narrated:
+                phrases = copied_phrases(s["narration"], grams)
+                if phrases:
+                    out["copied"][s["id"]] = phrases
             if out["copied"]:
                 shown = "; ".join(f'{sid}: "{ph[0]}"' for sid, ph in list(out["copied"].items())[:10])
                 problems.append(
-                    f"{len(out['copied'])} scene{'s' if len(out['copied']) != 1 else ''} repeat the source word for word ({COPY_RUN_WORDS} or more of its words in a row): {shown}. Say it your own way."
+                    f"{len(out['copied'])} scene{'s' if len(out['copied']) != 1 else ''} repeat the reference word for word ({COPY_RUN_WORDS} or more of its words in a row): {shown}. Say it your own way."
                 )
+        state = self.script_state(pid, p)
+        if state["waiting"]:
+            out["waiting"] = state
         return out
 
+    def script_state(self, pid: str, p: dict | None = None) -> dict:
+        """The script and the user's own words, for the page and for Claude:
+        - review: the script waits for the user's rewrite before any scene code (on for new videos);
+        - approved: the user approved it;
+        - narrated, byUser: the video's own narrated scenes, and how many of them the user rewrote;
+        - slots: the places still left for the user's own words, [{id, name, asks}];
+        - waiting: Claude stops for the user (the review is on, there is a script, it isn't approved yet, and
+          some scene still has no code)."""
+        p = p or self.get_project(pid)
+        own = [s for s in p["scenes"] if s.get("kind") not in CLOSING_KINDS]
+        narrated = [s for s in own if (s.get("narration") or "").strip()]
+        slots = []
+        for s in narrated:
+            asks = vc.slots(s["narration"])
+            if asks:
+                slots.append({"id": s["id"], "name": s.get("name") or s["id"], "asks": asks})
+        review = bool(p.get("scriptReview"))
+        approved = bool((p.get("script") or {}).get("approved"))
+        unbuilt = any(s.get("status") != "written" for s in own)
+        return {
+            "review": review,
+            "approved": approved,
+            "narrated": len(narrated),
+            "byUser": sum(1 for s in narrated if s.get("byUser")),
+            "slots": slots,
+            "waiting": review and bool(narrated) and not approved and unbuilt,
+        }
+
+    def approve_script(self, pid: str) -> dict:
+        """The user approves the script, in their own words: Claude may build the scenes. Refused while a place
+        left for their words is still open (the voice would read the note)."""
+        with self.lock(pid):
+            p = self.get_project(pid)
+            st = self.script_state(pid, p)
+            if not st["narrated"]:
+                raise StoreError("There is no script to approve yet: Claude writes the draft first.")
+            if st["slots"]:
+                n = sum(len(x["asks"]) for x in st["slots"])
+                shown = ", ".join(x["id"] for x in st["slots"][:12])
+                raise StoreError(f"{n} place{'s' if n != 1 else ''} still wait{'' if n != 1 else 's'} for your own words ({shown}). Write them in, or take them out, then approve.")
+            p["script"] = {"approved": True, "at": now()}
+            return self._save(pid, p)
+
+    def reopen_script(self, pid: str) -> dict:
+        """Takes the approval back: Claude waits for the user again before writing more scene code."""
+        with self.lock(pid):
+            p = self.get_project(pid)
+            p["script"] = {"approved": False}
+            return self._save(pid, p)
+
+    def other_plans(self, pid: str, limit: int = 6) -> list[dict]:
+        """The user's other videos, newest first, with the shape and length each took ({title, shape, minutes};
+        shape None for one made before plans), so a new plan can be different."""
+        out = []
+        for d in self.projects_dir.iterdir() if self.projects_dir.exists() else []:
+            if d.name == pid or not d.is_dir():
+                continue
+            q = read_json(d / "project.json")
+            if not isinstance(q, dict) or not q.get("scenes"):
+                continue
+            plan = q.get("plan") or {}
+            seconds = sum(float(s.get("duration") or 0) for s in q["scenes"] if s.get("kind") not in CLOSING_KINDS)
+            out.append({"title": q.get("title") or d.name, "shape": plan.get("shape"), "minutes": round(seconds / 60, 1), "at": q.get("createdAt") or 0})
+        out.sort(key=lambda x: -float(x["at"] or 0))
+        return [{k: v for k, v in x.items() if k != "at"} for x in out[:limit]]
+
     def script_markdown(self, pid: str) -> str:
-        """The narration as a readable script, with parts, labels and timings (the chapters come from parts)."""
+        """The narration as a readable script, with parts, labels and timings (the chapters come from parts),
+        which scenes are in the user's own words and where their words are still needed."""
         p = self.get_project(pid)
         lines = [f"# {p['title']}", ""]
         start, part = 0.0, None
         total = sum(s["duration"] for s in p["scenes"])
         voiced = sum(1 for s in p["scenes"] if self.timing(pid, p, s)["voiced"])
         lines.append(f"Length {fmt_clock(total)}, {len(p['scenes'])} scenes, {voiced} voiced.")
+        plan = p.get("plan")
+        if plan:
+            lines.append(f"Shape: {plan['shape']} ({plan['why']}). Length: about {plan['minutes']:g} min ({plan['lengthWhy']}).")
+        lines.append(f"Tone: {tone_of(p)}.")
         chapters = self.chapters(pid, p)
         if chapters:
             lines += ["", "## Chapters", ""] + [f"{fmt_clock(c['start'])} {c['title']}" for c in chapters]
@@ -1471,25 +1715,18 @@ class Store:
             if s.get("part") and s["part"] != part:
                 part = s["part"]
                 lines += ["", f"## {part}"]
-            lines += ["", f"### {i}. {s['name']} ({fmt_clock(start)}, {s['duration']:.1f} s)" + (f" - label: {s['label']}" if s.get("label") else "")]
+            head = f"### {i}. {s['name']} ({fmt_clock(start)}, {s['duration']:.1f} s)" + (f" - label: {s['label']}" if s.get("label") else "")
+            lines += ["", head + (" - your words" if s.get("byUser") else "")]
             if s.get("narration"):
                 lines.append(vc.CUE_RE.sub(" <cue/> ", s["narration"]).replace("  ", " ").strip())
             elif s.get("kind") == "endscreen":
                 lines.append("(end screen)")
-            if s.get("covers"):
-                lines += ["", "Source: " + ", ".join(s["covers"])]
             start += s["duration"]
-        src = self.get_source(pid)
-        if src:
-            review = self.plan_review(pid, p)
-            cov = review["coverage"] or coverage(src["lines"], p["scenes"], p.get("sourceSkips") or [])
-            lines += ["", "## Source coverage", "", f"{src['name']} ({fmt_clock(src['seconds'])}): {cov['covered']} of {cov['total']} timed lines covered, {cov['skipped']} skipped, {len(cov['missing'])} not covered."]
-            for k in p.get("sourceSkips") or []:
-                lines.append(f"- skipped {k['range']}: {k['reason']}")
-            for ln in cov["missing"][:60]:
-                lines.append(f"- not covered [{fmt_clock(ln['t'])}] {ln['text']}")
-            for sid, phrases in review["copied"].items():
-                lines.append(f"- {sid} repeats the source: \"{phrases[0]}\"")
+        if self.get_source(pid):
+            copied = self.plan_review(pid, p)["copied"]
+            if copied:
+                lines += ["", "## Wording copied from the reference", ""]
+                lines += [f"- {sid}: \"{phrases[0]}\"" for sid, phrases in copied.items()]
         return "\n".join(lines) + "\n"
 
     def chapters(self, pid: str, p: dict | None = None) -> list[dict]:
@@ -1504,6 +1741,295 @@ class Store:
         if out:
             out[0]["start"] = 0.0
         return out
+
+    # ── publishing: playlists and courses, each video's place, its status and its details ──
+
+    def _placements(self) -> list[dict]:
+        """Every video that sits in a playlist or course: {id, title, cid, order, section, createdAt, status}."""
+        out = []
+        for d in self.projects_dir.iterdir() if self.projects_dir.exists() else []:
+            q = read_json(d / "project.json") if d.is_dir() else None
+            place = (q or {}).get("collection") if isinstance(q, dict) else None
+            if not place or not place.get("id"):
+                continue
+            seconds = sum(float(s.get("duration") or 0) for s in q.get("scenes") or [])
+            out.append({
+                "id": q["id"], "title": q.get("title") or d.name, "cid": place["id"], "order": place.get("order") or 0,
+                "section": place.get("section"), "createdAt": q.get("createdAt") or 0, "status": q.get("status") or {},
+                "duration": round(seconds, 1),
+            })
+        return out
+
+    def collection_members(self, cid: str) -> list[dict]:
+        """A playlist's or course's videos in episode order."""
+        members = [m for m in self._placements() if m["cid"] == cid]
+        members.sort(key=lambda m: (m["order"], m["createdAt"]))
+        return members
+
+    def _renumber(self, cid: str, moved: str | None = None) -> dict:
+        """Numbers a collection's videos 1, 2, 3... again after a move, an addition or a removal (the video just
+        moved goes to the number it asked for, the others keep their order around it). Writes only the videos
+        whose number changed (their place, nothing else: no version bump). Returns {id: number}."""
+        members = self.collection_members(cid)
+        m = next((x for x in members if x["id"] == moved), None)
+        if m:
+            members.remove(m)
+            members.insert(min(max(int(m["order"]), 1), len(members) + 1) - 1, m)
+        numbers = {}
+        for i, m in enumerate(members, 1):
+            numbers[m["id"]] = i
+            if m["order"] == i:
+                continue
+            with self.lock(m["id"]):
+                f = self.projects_dir / m["id"] / "project.json"
+                q = read_json(f)
+                if isinstance(q, dict) and (q.get("collection") or {}).get("id") == cid:
+                    q["collection"] = {**q["collection"], "order": i}
+                    write_json(f, q)
+        return numbers
+
+    def _place(self, p: dict, where: dict) -> None:
+        """Puts the video in a playlist or course ({id, order?, section?}): at that episode number (the end when
+        none is given; the videos from there on move down one when _renumber runs after the save), in that Udemy section (by
+        default the one of the video before it). A Udemy course makes it a Udemy video, a playlist a YouTube one."""
+        if not isinstance(where, dict) or not where.get("id"):
+            raise StoreError("collection must be an object like {id, order, section}")
+        c = self.collections.get(str(where["id"]))
+        if not c:
+            raise StoreError("No such playlist or course.", 404)
+        members = [m for m in self.collection_members(c["id"]) if m["id"] != p["id"]]
+        order = where.get("order")
+        order = int(order) if isinstance(order, (int, float)) and not isinstance(order, bool) and order >= 1 else len(members) + 1
+        order = min(order, len(members) + 1)
+        current = p.get("collection") or {}
+        if "section" in where:
+            section = str(where.get("section") or "").strip()[:80] or None
+        elif current.get("id") == c["id"]:
+            section = current.get("section")
+        else:
+            before = members[order - 2] if order >= 2 else None
+            section = before["section"] if before and c["kind"] == "udemy" else None
+        p["collection"] = {"id": c["id"], "order": order, "section": section}
+        if c["kind"] != destination_of(p):
+            p["destination"] = c["kind"]
+            if c["kind"] == "youtube":
+                p["closing"] = {"logo": True, "url": True, "promo": False, "endscreen": True}
+
+    def placement(self, pid: str, p: dict | None = None) -> dict | None:
+        """Where the video sits: its playlist or course, its episode number of how many, its Udemy section, the
+        episodes either side and the whole list. None when it is in none (or its collection was deleted)."""
+        p = p or self.get_project(pid)
+        place = p.get("collection")
+        c = self.collections.get(place["id"]) if place and place.get("id") else None
+        if not c:
+            return None
+        members = self.collection_members(c["id"])
+        idx = next((i for i, m in enumerate(members) if m["id"] == pid), None)
+        if idx is None:
+            return None
+        return {
+            "collection": c,
+            "episode": idx + 1,
+            "count": len(members),
+            "section": place.get("section"),
+            "previous": members[idx - 1]["title"] if idx > 0 else None,
+            "next": members[idx + 1]["title"] if idx + 1 < len(members) else None,
+            "episodes": [{"id": m["id"], "title": m["title"], "episode": i, "section": m["section"]} for i, m in enumerate(members, 1)],
+        }
+
+    def list_collections(self) -> list[dict]:
+        """The playlists and courses, each with its videos in order ({id, title, episode, section, status,
+        duration}), newest collection last."""
+        by: dict[str, list] = defaultdict(list)
+        for m in self._placements():
+            by[m["cid"]].append(m)
+        out = []
+        for c in self.collections.list():
+            members = sorted(by.get(c["id"], []), key=lambda m: (m["order"], m["createdAt"]))
+            out.append({
+                **c,
+                "videos": [{"id": m["id"], "title": m["title"], "episode": i, "section": m["section"], "status": m["status"], "duration": m["duration"]} for i, m in enumerate(members, 1)],
+            })
+        return out
+
+    def create_collection(self, kind: str, title: str) -> dict:
+        try:
+            return self.collections.create(kind, title)
+        except pb.PublishingError as e:
+            raise StoreError(str(e)) from None
+
+    def update_collection(self, cid: str, fields: dict) -> dict:
+        try:
+            return self.collections.update(cid, fields)
+        except pb.PublishingError as e:
+            raise StoreError(str(e), 404 if "No such" in str(e) else 400) from None
+
+    def reorder_collection(self, cid: str, ids: list[str]) -> None:
+        """The episode order the user dragged: ids first to last (videos left out keep their order after them)."""
+        if not self.collections.get(cid):
+            raise StoreError("No such playlist or course.", 404)
+        members = self.collection_members(cid)
+        known = {m["id"] for m in members}
+        wanted = [i for i in ids if i in known]
+        rest = [m["id"] for m in members if m["id"] not in wanted]
+        for n, vid in enumerate(wanted + rest, 1):
+            with self.lock(vid):
+                f = self.projects_dir / vid / "project.json"
+                q = read_json(f)
+                if isinstance(q, dict) and (q.get("collection") or {}).get("id") == cid:
+                    q["collection"] = {**q["collection"], "order": n}
+                    write_json(f, q)
+
+    def delete_collection(self, cid: str) -> None:
+        """Deletes a playlist or course. Its videos stay, in no collection."""
+        for m in self.collection_members(cid):
+            with self.lock(m["id"]):
+                f = self.projects_dir / m["id"] / "project.json"
+                q = read_json(f)
+                if isinstance(q, dict):
+                    q["collection"] = None
+                    write_json(f, q)
+        self.collections.delete(cid)
+
+    @staticmethod
+    def _status_change(p: dict, change) -> dict:
+        """The user's own marks: {downloaded: bool, uploaded: bool, uploadUrl: "https://..."}. A link counts as
+        uploaded. Downloading is also marked by the app itself, when an MP4 is downloaded."""
+        if not isinstance(change, dict):
+            raise StoreError("status must be an object like {uploaded: true, uploadUrl: ...}")
+        st = dict(p.get("status") or {})
+        if "downloaded" in change:
+            if change["downloaded"]:
+                st["downloadedAt"] = st.get("downloadedAt") or now()
+            else:
+                st.pop("downloadedAt", None)
+                st.pop("downloadedFile", None)
+        if "uploadUrl" in change:
+            url = str(change.get("uploadUrl") or "").strip()
+            if url and not pb.url_ok(url):
+                raise StoreError("The upload link must be a full address (https://...).")
+            if url:
+                st["uploadUrl"] = url[:500]
+                st["uploadedAt"] = st.get("uploadedAt") or now()
+            else:
+                st.pop("uploadUrl", None)
+        if "uploaded" in change:
+            if change["uploaded"]:
+                st["uploadedAt"] = st.get("uploadedAt") or now()
+            else:
+                st.pop("uploadedAt", None)
+                st.pop("uploadUrl", None)
+        return st
+
+    def mark_downloaded(self, pid: str, file: str) -> dict:
+        """The app marks a video downloaded when its MP4 is downloaded from the page."""
+        with self.lock(pid):
+            p = self.get_project(pid)
+            p["status"] = {**(p.get("status") or {}), "downloadedAt": now(), "downloadedFile": file}
+            return self._save(pid, p)
+
+    STAGES = ("script", "built", "voiced", "exported", "downloaded", "uploaded")
+
+    def progress(self, p: dict, exported: bool) -> dict:
+        """How far a video has got, step by step, and the furthest step reached (stage; "new" before any)."""
+        own = [s for s in p.get("scenes") or [] if s.get("kind") not in CLOSING_KINDS]
+        narrated = [s for s in own if (s.get("narration") or "").strip()]
+        st = p.get("status") or {}
+        steps = {
+            "script": bool(narrated),
+            "built": bool(own) and all(s.get("status") == "written" for s in own),
+            "voiced": bool(narrated) and all((s.get("voice") or {}).get("hash") for s in narrated),
+            "exported": bool(exported),
+            "downloaded": bool(st.get("downloadedAt")),
+            "uploaded": bool(st.get("uploadedAt")),
+        }
+        stage = "new"
+        for k in self.STAGES:
+            if steps[k]:
+                stage = k
+        return {"stage": stage, **steps}
+
+    def _merge_details(self, p: dict, youtube, udemy, replace: bool) -> dict:
+        """Cleans the publishing details (publishing.YOUTUBE_FIELDS and UDEMY_FIELDS) and merges them into the
+        video's, field by field (replace: the platform's details become exactly these)."""
+        d = dict(p.get("details") or {})
+        for key, raw, spec in (("youtube", youtube, pb.YOUTUBE_FIELDS), ("udemy", udemy, pb.UDEMY_FIELDS)):
+            if raw is None:
+                continue
+            try:
+                clean = pb.clean_fields(raw, spec)
+            except pb.PublishingError as e:
+                raise StoreError(f"{key}: {e}") from None
+            d[key] = clean if replace else {**(d.get(key) or {}), **clean}
+            # a new description from Claude replaces the text the user edited by hand (their "post")
+            rewritten = ("description", "hashtags") if key == "youtube" else ("lectureDescription", "objectives")
+            if "post" not in clean and any(k in clean for k in rewritten):
+                d[key].pop("post", None)
+            if key == "youtube" and d[key].get("titles") and d[key].get("title") not in d[key]["titles"] and not (raw or {}).get("title"):
+                d[key]["title"] = d[key]["titles"][0]  # the first option until the user picks one
+        d["at"] = now()
+        return d
+
+    def write_details(self, pid: str, youtube: dict | None = None, udemy: dict | None = None, collection: dict | None = None, replace: bool = False) -> tuple[dict, list[str]]:
+        """Claude's publishing details for the video (and, with collection, its playlist's or course's own
+        details). Returns the project and what a top creator would still fix."""
+        with self.lock(pid):
+            p = self.get_project(pid)
+            if youtube is not None or udemy is not None:
+                p["details"] = self._merge_details(p, youtube, udemy, replace)
+                p = self._save(pid, p)
+        d = p.get("details") or {}
+        warnings = []
+        for key, raw in (("youtube", youtube), ("udemy", udemy)):
+            if raw is not None:
+                warnings += [f"{key}: {w}" for w in pb.details_warnings(key, d.get(key) or {})]
+        if collection is not None:
+            place = self.placement(pid, p)
+            if not place:
+                warnings.append("collection details not saved: this video is in no playlist or course")
+            else:
+                self.update_collection(place["collection"]["id"], {"meta": collection})
+                if place["collection"]["kind"] == "udemy":
+                    meta = (self.collections.get(place["collection"]["id"]) or {}).get("meta") or {}
+                    if len((meta.get("description") or "").split()) < 200:
+                        warnings.append("course: the description needs 200 words or more (Udemy's minimum)")
+                    if len(meta.get("objectives") or []) < 4:
+                        warnings.append("course: at least 4 objectives (Udemy's minimum)")
+        return p, warnings
+
+    def details_view(self, pid: str) -> dict:
+        """Everything the upload needs, for the Details page: the YouTube and Udemy fields, the description as it
+        is pasted (with the chapters), what is still worth fixing, where the video sits and how far it has got."""
+        p = self.get_project(pid)
+        d = p.get("details") or {}
+        yt, ud = d.get("youtube") or {}, d.get("udemy") or {}
+        chapters = self.chapters(pid, p)
+        renders = self._dir(pid) / "renders"
+        exported = renders.exists() and any(".part" not in f.name and ".audio" not in f.name for f in renders.glob("*.mp4"))
+        return {
+            "destination": destination_of(p),
+            "youtube": yt,
+            "udemy": ud,
+            "at": d.get("at"),
+            "chapters": [{"start": c["start"], "clock": fmt_clock(c["start"]), "title": c["title"]} for c in chapters],
+            "youtubeDescription": pb.youtube_description(yt, chapters, fmt_clock) if yt else "",
+            "udemyDescription": pb.udemy_description(ud) if ud else "",
+            "warnings": {"youtube": pb.details_warnings("youtube", yt) if yt else [], "udemy": pb.details_warnings("udemy", ud) if ud else []},
+            "placement": self.placement(pid, p),
+            "status": p.get("status") or {},
+            "progress": self.progress(p, exported),
+        }
+
+    def details_markdown(self, pid: str) -> str:
+        """DETAILS.md: every publishing detail of the video in one file (in the publishing kit)."""
+        p = self.get_project(pid)
+        place = self.placement(pid, p)
+        if place:
+            c = place["collection"]
+            where = f'{"Lecture" if c["kind"] == "udemy" else "Episode"} {place["episode"]} of {place["count"]} in the {pb.KINDS[c["kind"]]} "{c["title"]}"' + (f', section "{place["section"]}"' if place["section"] else "")
+        else:
+            where = f"For {destination_of(p).capitalize()}, in no playlist or course."
+        return pb.details_markdown(p["title"], where, p.get("details") or {}, self.chapters(pid, p), fmt_clock)
 
     # ── undo snapshots ──
 
@@ -1576,16 +2102,37 @@ class Store:
             size = image_size(f) if item["kind"] == "image" else None
             if size:
                 item["width"], item["height"] = size
+            meta = self.asset_meta(pid, f.name)
+            if meta:  # a b-roll clip or a stock photo: its length, size and where it came from
+                item.update({k: meta[k] for k in ("seconds", "width", "height", "fps", "source", "state") if meta.get(k) is not None})
             out.append(item)
+        # clips still converting after an upload (broll.Clips): listed so the page can show them coming
+        meta_dir = self.assets_dir(pid) / ".meta"
+        if meta_dir.exists():
+            for m in sorted(meta_dir.glob("*.json")):
+                name = m.name[: -len(".json")]
+                meta = read_json(m) or {}
+                if meta.get("state") == "converting" and not (self.assets_dir(pid) / name).exists():
+                    out.append({"name": name, "kind": meta.get("kind") or "video", "bytes": 0, "state": "converting", "source": meta.get("source")})
         return out
+
+    def asset_meta(self, pid: str, name: str) -> dict | None:
+        """What the b-roll import or conversion recorded about an asset (assets/.meta/<name>.json), or None."""
+        f = self.assets_dir(pid) / ".meta" / f"{Path(name).name}.json"
+        return read_json(f) if f.exists() else None
 
     def save_asset(self, pid: str, filename: str, data: bytes) -> dict:
         name = safe_asset_name(filename)
         ext = os.path.splitext(name)[1]
         if ext not in ASSET_EXT:
-            raise StoreError(f"{ext or 'This file type'} is not supported. Use images, audio, PDF, text or font files.")
+            raise StoreError(f"{ext or 'This file type'} is not supported. Use images, audio, video, PDF, text or font files.")
+        if ext in VIDEO_EXT:
+            # a clip is converted before it is used (broll.Clips, from the upload route; import_broll for stock)
+            raise StoreError("Videos are added through the upload (the paperclip), which converts them for the video, or import_broll for stock clips.")
         if len(data) > MAX_ASSET_BYTES:
             raise StoreError(f"The file is larger than {MAX_ASSET_BYTES // (1024 * 1024)} MB.")
+        if ext.lower() == ".excalidraw":
+            parse_drawing(data)  # refused when it isn't an Excalidraw drawing
         folder = self.assets_dir(pid)
         stem, i = os.path.splitext(name)[0], 2
         while (folder / name).exists():
@@ -1608,8 +2155,22 @@ class Store:
             raise StoreError("No such asset.", 404)
         return f
 
+    def read_drawing(self, pid: str, name: str) -> dict:
+        """One of the user's Excalidraw drawings (an uploaded .excalidraw asset): its elements, bounds and texts
+        (drawing_elements)."""
+        name = name.strip()
+        if not name.lower().endswith(".excalidraw"):
+            name += ".excalidraw"
+        try:
+            f = self.asset_path(pid, name)
+        except StoreError:
+            drawings = [a["name"] for a in self.list_assets(pid) if a["kind"] == "drawing"]
+            raise StoreError(f"No drawing named {name}." + (f" Drawings: {', '.join(drawings)}." if drawings else " The user hasn't uploaded one yet."), 404) from None
+        return drawing_elements(parse_drawing(f.read_bytes()))
+
     def delete_asset(self, pid: str, name: str) -> None:
         self.asset_path(pid, name).unlink()
+        (self.assets_dir(pid) / ".meta" / f"{Path(name).name}.json").unlink(missing_ok=True)
 
     # ── chat ──
 
@@ -1868,6 +2429,21 @@ class Store:
             "keySet": vc.api_key() is not None,
         }
 
+    @staticmethod
+    def _plain_frame_note(p: dict, kit: dict | None) -> str:
+        """What the frame draws in a kit that isn't paper (frontend/src/motion/player/frame.ts): the kit's logo
+        bottom-left and its web address bottom-right, each only when the kit has it and the settings show it."""
+        closing = closing_of(p)
+        parts = []
+        if closing["logo"] and kit and (kit.get("icon") or kit.get("logo")):
+            parts.append("the logo bottom-left")
+        if closing["url"] and kit and (kit.get("endCard") or {}).get("url"):
+            parts.append(f'the web address {kit["endCard"]["url"]} bottom-right')
+        if not parts:
+            return ""
+        where = "at the top" if p.get("aspect") == "9:16" else "in the bottom margin"
+        return f" (the frame draws {' and '.join(parts)} as small pills {where}, outside the safe area; keep source tags and captions inside the safe area)"
+
     def state_summary(self, pid: str) -> str:
         """The project as text, sent with every message so Claude works from what is really there."""
         p = self.get_project(pid)
@@ -1878,7 +2454,7 @@ class Store:
         theme = (kit or {}).get("theme") or "plain"
         lines = [f'<project_state version="{p["version"]}">']
         lines.append(f'title: {p["title"]}')
-        lines.append(f'theme: {theme}' + (" (the AlgoInsight daily paper look: the frame draws the logo card, title, part tag and watermark; scenes draw the page)" if theme == "paper" else ""))
+        lines.append(f'theme: {theme}' + (" (the AlgoInsight daily paper look: the frame draws the logo card, title, part tag and watermark; scenes draw the page)" if theme == "paper" else self._plain_frame_note(p, kit)))
         lines.append(f'aspect: {p["aspect"]} (stage {w} x {h} px), {p.get("fps", FPS)} fps, length now {fmt_clock(total)}')
         closing = closing_of(p)
         if destination_of(p) == "udemy":
@@ -1886,27 +2462,64 @@ class Store:
         else:
             on = [n for k, n in (("logo", "logo card"), ("url", "web address"), ("promo", "AlgoInsight promo"), ("endscreen", "end screen")) if closing[k]]
             lines.append("made for: YouTube; the video's settings add " + (", ".join(on) if on else "nothing") + " (the promo and the end screen are added after your scenes; never plan, write or edit them)")
+        place = self.placement(pid, p)
+        if place:
+            c = place["collection"]
+            unit = "lecture" if c["kind"] == "udemy" else "episode"
+            near = [f'before it: "{place["previous"]}"' if place["previous"] else "the first one", f'after it: "{place["next"]}"' if place["next"] else "the last one so far"]
+            lines.append(
+                f'placement: {unit} {place["episode"]} of {place["count"]} in the {pb.KINDS[c["kind"]]} "{c["title"]}"'
+                + (f', section "{place["section"]}"' if place["section"] else "")
+                + f' ({"; ".join(near)}). Build on what the earlier ones taught; never teach it again'
+            )
+            if place["count"] > 1:
+                lines.append(f"  the {unit}s in order: " + "; ".join(f'{e["episode"]} "{e["title"]}"' + (f' [{e["section"]}]' if e["section"] else "") for e in place["episodes"][:40]))
+            meta = c.get("meta") or {}
+            if not meta.get("description"):
+                lines.append(f'  the {pb.KINDS[c["kind"]]} has no description yet (write_details collection, at the hand-off)')
+        else:
+            lines.append("placement: in no playlist or course (the user can place it in Details)")
         review = self.plan_review(pid, p)
         if review["window"]:
             lo, hi = review["window"]
-            lines.append(f'target length: {fmt_clock(p["targetSeconds"])}; the whole video must run between {fmt_clock(lo)} and {fmt_clock(hi)}')
+            lines.append(f'length the user set: {fmt_clock(p["targetSeconds"])}; the whole video must run between {fmt_clock(lo)} and {fmt_clock(hi)}')
+        tone = tone_of(p)
+        lines.append(f"tone: {tone} ({TONES[tone]}); write the narration in it (see Tone)")
+        plan = p.get("plan")
+        if plan:
+            lines.append(f'plan: shape {plan["shape"]} ({plan["why"]}); about {plan["minutes"]:g} min ({plan["lengthWhy"]})')
+        elif p.get("scriptReview"):
+            lines.append("plan: none yet (write_storyboard plan: the shape and length this topic needs)")
+        others = self.other_plans(pid)
+        if others:
+            lines.append(
+                "the user's other videos, newest first (vary the shape): "
+                + "; ".join(f'"{o["title"]}" {o["shape"] or "shape not recorded"}, {o["minutes"]:g} min' for o in others)
+            )
         src = self.get_source(pid)
         if src:
-            cov = review["coverage"]
-            line = f'source: {src["name"]}, {fmt_clock(src["seconds"])}, {len(src["lines"])} timed lines (the points to cover; read_source lists them with what covers each)'
-            if cov:
-                line += f'; {cov["covered"]} covered by scenes, {cov["skipped"]} skipped, {len(cov["missing"])} not covered yet'
-            lines.append(line)
-            if p.get("sourceSkips"):
-                lines.append("source skips: " + "; ".join(f'{k["range"]} ({k["reason"]})' for k in p["sourceSkips"]))
+            lines.append(
+                f'reference: {src["name"]}, {fmt_clock(src["seconds"])}, {len(src["lines"])} timed lines (research only: what viewers ask, '
+                "what it gets wrong. Never its outline, order, examples or length; read_source reads it)"
+            )
         refs = p.get("references") or []
         if refs:
             lines.append(f'references: {len(refs)} screenshots of the source, {ref_clock(refs[0]["t"])}-{ref_clock(refs[-1]["t"])} (view_references; to look at, never to show)')
         if review["problems"]:
             lines.append("before any scene code (write_scene is refused until these are fixed):")
             lines += [f"  - {x}" for x in review["problems"]]
-        elif (p.get("targetSeconds") or src) and p["scenes"]:
-            lines.append("script check: length, source coverage and own wording all pass")
+        elif (p.get("targetSeconds") or src or plan) and p["scenes"]:
+            lines.append("script check: passes")
+        st = self.script_state(pid, p)
+        if st["review"]:
+            if st["waiting"]:
+                slots = sum(len(x["asks"]) for x in st["slots"])
+                lines.append(
+                    f'script: waiting for the user to put it in their own words and approve it ({st["byUser"]} of {st["narrated"]} narrated scenes rewritten, '
+                    f'{slots} place{"s" if slots != 1 else ""} left for their words). write_scene is refused until they approve it in Script > Your words.'
+                )
+            elif st["approved"]:
+                lines.append(f'script: approved by the user ({st["byUser"]} of {st["narrated"]} narrated scenes in their own words; never change those unless asked)')
         if p.get("brief"):
             lines.append("brief: " + json.dumps(p["brief"], ensure_ascii=False, sort_keys=True))
         vs = self.voice_status(pid)
@@ -1923,6 +2536,16 @@ class Store:
             lines.append(f'thumbnail: written (rev {th.get("rev", 0)}), props {tprops[:300] + "...}" if len(tprops) > 300 else tprops}; write_thumbnail replaces it')
         else:
             lines.append("thumbnail: none yet (design it with write_thumbnail at the hand-off)")
+        dest = destination_of(p)
+        det = (p.get("details") or {}).get(dest) or {}
+        if det:
+            name = det.get("title") or det.get("lectureTitle") or ""
+            lines.append(f'publishing details ({dest}): written' + (f', title "{name}"' if name else "") + "; write_details changes them (the user sees and edits them in Details)")
+        else:
+            lines.append(f"publishing details ({dest}): none yet (write_details at the hand-off, see Publishing details)")
+        st = p.get("status") or {}
+        if st.get("uploadedAt"):
+            lines.append("status: uploaded" + (f' ({st["uploadUrl"]})' if st.get("uploadUrl") else "") + ": changes now need a new upload")
         if kit:
             pal = ", ".join(f"{k} {v}" for k, v in kit["palette"].items())
             ext = ", ".join(f"{k} {v}" for k, v in (kit.get("extras") or {}).items())
@@ -1940,8 +2563,28 @@ class Store:
             lines.append("brand kit: none (use the defaults)")
         refs_named = self.reference_assets(p)  # the references have their own line above
         assets = [a for a in self.list_assets(pid) if a["name"] not in refs_named]
+        clips = [a for a in assets if a["kind"] == "video"]
+        assets = [a for a in assets if a["kind"] != "video"]
         if assets:
             lines.append("assets: " + ", ".join(a["name"] + (f' ({a["width"]}x{a["height"]})' if a.get("width") else f' ({a["kind"]})') for a in assets))
+        for a in [a for a in assets if a["kind"] == "drawing"][:8]:
+            # the user's Excalidraw drawings, with the words in them (read_drawing lists every element)
+            try:
+                info = self.read_drawing(pid, a["name"])
+            except StoreError as e:
+                lines.append(f'drawing {a["name"]}: {e}')
+                continue
+            words = "; ".join(info["texts"])
+            lines.append(f'drawing {a["name"]}: {len(info["elements"])} elements' + (f', texts: {words[:300] + ("..." if len(words) > 300 else "")}' if words else ", no text"))
+        if clips:
+            # b-roll clips (the user's uploads and imported stock): their length decides what they can sit under
+            lines.append(
+                "b-roll clips: "
+                + ", ".join(
+                    a["name"] + (" (still converting)" if a.get("state") == "converting" else f' ({a.get("seconds", 0):.1f} s, {a.get("width")}x{a.get("height")}, {"stock" if a.get("source") in ("pexels", "pixabay") else "the user\'s own"})')
+                    for a in clips
+                )
+            )
         if p.get("audio"):
             lines.append(f'soundtrack: {p["audio"]}')
         if p["scenes"]:
@@ -1963,8 +2606,10 @@ class Store:
                     extra.append(f'label "{s["label"]}"')
                 if t["narrated"]:
                     extra.append(f'{t["words"]} words, {vc.count_cues(s["narration"])} cues, ' + ("voiced" if t["voiced"] else "voice changed" if t["stale"] else "estimated timing"))
-                if s.get("covers"):
-                    extra.append("covers " + ", ".join(s["covers"]))
+                if s.get("byUser"):
+                    extra.append("narration in the user's own words")
+                if t["narrated"] and vc.slots(s["narration"]):
+                    extra.append(f'{len(vc.slots(s["narration"]))} place(s) left for the user\'s words')
                 lines.append(f'  {i}. {s["id"]} "{s["name"]}" at {fmt_clock(start)}, {s["duration"]:.1f} s, {s["transition"]}, {s.get("status", "planned")}' + (", " + ", ".join(extra) if extra else "") + f", props {props}")
                 start += s["duration"]
         else:

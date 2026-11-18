@@ -255,7 +255,9 @@ if _dist.exists():
 
     @app.get("/")
     def index() -> FileResponse:
-        return FileResponse(_dist / "index.html")
+        # no-cache: the browser asks again every time (a 304 when nothing changed). A rebuild deletes the old
+        # hashed scripts, so a page kept from before it would point at files that are gone.
+        return FileResponse(_dist / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 if __name__ == "__main__":

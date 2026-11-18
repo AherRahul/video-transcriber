@@ -115,10 +115,163 @@ export type Project = {
   closing?: Closing;
   /** the YouTube thumbnail Claude designed (write_thumbnail); null or missing when there is none */
   thumbnail?: Thumbnail | null;
+  /** the script waits for the user's own words before any scene code (on for new videos) */
+  scriptReview?: boolean;
+  /** how the script speaks (normal when missing) */
+  tone?: Tone;
+  /** the shape and length Claude chose for the topic, each with why */
+  plan?: VideoPlan | null;
+  /** the scenes as saved: byUser marks narration the user rewrote in their own words */
+  scenes?: { id: string; byUser?: boolean }[];
+  /** the playlist or course it sits in (null or missing: none) */
+  collection?: Placement | null;
+  /** the user's marks: downloaded (also set by a download from the page) and uploaded */
+  status?: VideoStatus;
+  /** the publishing details (Claude's write_details and the user's edits in Details) */
+  details?: { youtube?: YoutubeDetails; udemy?: UdemyDetails; at?: number };
   version: number;
   createdAt: number;
   updatedAt: number;
 };
+
+// ── publishing: playlists and courses, each video's place and status, and its details ──
+
+/** A YouTube playlist or a Udemy course (the kind is where its videos go). */
+export type Collection = {
+  id: string;
+  kind: Destination;
+  title: string;
+  meta: CollectionMeta;
+  createdAt: number;
+  /** its videos in episode order (missing on a collection just created) */
+  videos?: CollectionVideo[];
+};
+
+/** A playlist's own details (title, description) or a course's landing page (title 60, subtitle 120,
+ * description of 200 words or more, 4 or more objectives, requirements, audience, level). */
+export type CollectionMeta = {
+  title?: string;
+  subtitle?: string;
+  description?: string;
+  objectives?: string[];
+  requirements?: string[];
+  audience?: string[];
+  level?: string | null;
+};
+
+export type CollectionVideo = { id: string; title: string; episode: number; section: string | null; status: VideoStatus; duration: number };
+
+/** A video's place in a collection: the episode (or lecture) number and, for a course, its section. */
+export type Placement = { id: string; order: number; section: string | null };
+
+/** Times are seconds since the epoch, like the project's own. */
+export type VideoStatus = { downloadedAt?: number; downloadedFile?: string; uploadedAt?: number; uploadUrl?: string };
+
+/** How far a video has got, step by step (store.progress); stage is the furthest step reached. */
+export type Progress = {
+  stage: "new" | "script" | "built" | "voiced" | "exported" | "downloaded" | "uploaded";
+  script: boolean;
+  built: boolean;
+  voiced: boolean;
+  exported: boolean;
+  downloaded: boolean;
+  uploaded: boolean;
+};
+
+export type DetailLink = { label: string; url: string };
+
+/** YouTube's fields (backend/motion/publishing.py): what gets pasted, and the keyword it is written for. */
+export type YoutubeDetails = {
+  titles?: string[];
+  title?: string;
+  primaryKeyword?: string;
+  /** Claude's post, with a {chapters} line where the app puts the chapters */
+  description?: string;
+  hashtags?: string[];
+  tags?: string[];
+  /** the user's own final post, used as it is */
+  post?: string;
+};
+
+export type QuizQuestion = { question: string; options: string[]; answer: number | null; why: string };
+
+/** A Udemy lecture's fields (never AlgoInsight, our website, prices or the platform). */
+export type UdemyDetails = {
+  lectureTitle?: string;
+  lectureDescription?: string;
+  objectives?: string[];
+  keyTerms?: string[];
+  resources?: DetailLink[];
+  quiz?: QuizQuestion[];
+  freePreview?: boolean;
+  freePreviewWhy?: string;
+  /** the user's own final lecture description */
+  post?: string;
+};
+
+/** Where a video sits, as the Details page shows it. */
+export type PlacementView = {
+  collection: Collection;
+  episode: number;
+  count: number;
+  section: string | null;
+  previous: string | null;
+  next: string | null;
+  episodes: { id: string; title: string; episode: number; section: string | null }[];
+};
+
+/** GET /details: everything the upload needs, with the descriptions as they are pasted. */
+export type DetailsView = {
+  destination: Destination;
+  youtube: YoutubeDetails;
+  udemy: UdemyDetails;
+  at: number | null;
+  chapters: { start: number; clock: string; title: string }[];
+  youtubeDescription: string;
+  udemyDescription: string;
+  warnings: { youtube: string[]; udemy: string[] };
+  placement: PlacementView | null;
+  status: VideoStatus;
+  progress: Progress;
+  /** Claude is working on this video (Write with Claude waits for its turn to end) */
+  running?: boolean;
+};
+
+export const STAGE_LABEL: Record<Progress["stage"], string> = {
+  new: "New",
+  script: "Script",
+  built: "Scenes built",
+  voiced: "Voiced",
+  exported: "Exported",
+  downloaded: "Downloaded",
+  uploaded: "Uploaded",
+};
+
+export type VideoPlan = { shape: string; why: string; minutes: number; lengthWhy: string };
+
+/** How the script speaks (the server's TONES; the prompt's Tone section says what each asks of Claude). */
+export type Tone = "normal" | "funny" | "focused" | "informational";
+
+export const TONE_OPTIONS: { id: Tone; label: string; hint: string }[] = [
+  { id: "normal", label: "Normal", hint: "Simple, warm English with a little character, like the daily films." },
+  { id: "funny", label: "Funny", hint: "The same ideas with light, kind humour: small jokes, playful comparisons, a cheerful feel." },
+  { id: "focused", label: "Focused", hint: "Knowledge-heavy and precise: every sentence teaches, still in simple English." },
+  { id: "informational", label: "Informational", hint: "Research papers and technical sources decoded in simple English, in a calm tone." },
+];
+
+/** The script and the user's own words (store.script_state): whether it waits for their rewrite, whether
+ * they approved it, how many narrated scenes they rewrote, and the places still left for their words. */
+export type ScriptState = {
+  review: boolean;
+  approved: boolean;
+  narrated: number;
+  byUser: number;
+  slots: { id: string; name: string; asks: string[] }[];
+  waiting: boolean;
+};
+
+/** A place in Claude's draft for the user's own words: [[you: what goes here]] (the server's SLOT_RE). */
+export const SLOT_RE = /\[\[\s*you\s*:\s*([\s\S]*?)\s*\]\]/gi;
 
 export type Destination = "youtube" | "udemy";
 
@@ -152,6 +305,14 @@ export type ProjectSummary = {
   createdAt: number;
   updatedAt: number;
   brandKitId: string | null;
+  /** missing from a server older than collections */
+  destination?: Destination;
+  tone?: Tone;
+  collection?: Placement | null;
+  status?: VideoStatus;
+  progress?: Progress;
+  /** which platforms have publishing details written */
+  details?: { youtube: boolean; udemy: boolean };
 };
 
 export type ExportJob = {
@@ -188,6 +349,8 @@ export type ProjectView = {
   voiceJob: VoiceJob | null;
   renders: RenderFile[];
   totals: { cost?: number; planCost?: number; turns?: number };
+  /** missing from a server older than the script review */
+  script?: ScriptState;
 };
 
 export type Pronunciation = { written: string; spoken: string };
@@ -207,7 +370,20 @@ export type VoiceStatus = {
 
 export type ScriptView = { markdown: string; chapters: { start: number; title: string }[]; docs: { name: string; bytes: number; at: number }[] };
 
-export type Asset = { name: string; kind: "image" | "audio" | "document" | "font"; bytes: number; width?: number; height?: number };
+/** A file in the video's assets. A b-roll clip ("video") also has its length and frame rate, where it came from
+ * (an upload, or stock from pexels or pixabay), and state "converting" while an upload is being converted. */
+export type Asset = {
+  name: string;
+  /** drawing: an Excalidraw file (.excalidraw) a scene draws in with the x-draw markup */
+  kind: "image" | "audio" | "video" | "document" | "font" | "drawing";
+  bytes: number;
+  width?: number;
+  height?: number;
+  seconds?: number;
+  fps?: number;
+  source?: string;
+  state?: "converting" | "ready";
+};
 
 export type StyleOption = { id: string; name: string; description: string; palette: string[]; motion: "snappy" | "smooth"; verb: string };
 
@@ -251,6 +427,7 @@ export type HubOp =
   | { op: "kits"; seq: number }
   | { op: "voice"; seq: number; job: VoiceJob }
   | { op: "docs"; seq: number }
+  | { op: "assets"; seq: number }
   | { op: "reload"; seq: number };
 
 export type MotionHealth = {

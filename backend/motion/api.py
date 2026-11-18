@@ -3,14 +3,21 @@ HTTP routes under /api/motion, and `install(app, ...)`, which wires Motion into 
 
 Projects     GET/POST /projects, GET/PATCH/DELETE /projects/{id}, GET /projects/{id}/bundle
              (POST takes sourceText for a transcript, and framesJob to bring that transcription's
-             screenshots along as layout references)
+             screenshots along as layout references, and what the new-video dialog chose: destination,
+             collection {id, order, section}, tone, targetSeconds, scriptReview)
+Collections  GET/POST /collections, PATCH/DELETE /collections/{id}, POST /collections/{id}/order
+             (YouTube playlists and Udemy courses; a video is placed with PATCH /projects/{id} {collection})
+Details      GET /projects/{id}/details, GET /projects/{id}/details.md   (titles, descriptions, tags, quiz...
+             for YouTube and Udemy; edited with PATCH /projects/{id} {details}, marked with {status})
 Scenes       PUT /projects/{id}/scenes/{sceneId}   (direct edits from the page; refused if stale)
+Script       POST /projects/{id}/script/approve, POST .../script/reopen   (the user's own words, then scenes)
 Undo         POST /projects/{id}/undo
 Assets       GET/POST /projects/{id}/assets, GET/DELETE /projects/{id}/assets/{name}
 Chat         GET/POST /projects/{id}/chat, POST .../chat/stop, POST .../chat/new
 Live updates GET /projects/{id}/events?after=<seq>&boot=<id>   (long poll)
 Export       POST /projects/{id}/export {resolution, narration, sfx, loudness}, POST .../export/cancel,
-             GET /projects/{id}/renders/{file} (the MP4s and their .srt and .vtt captions)
+             GET /projects/{id}/renders/{file} (the MP4s and their .srt and .vtt captions; ?download=1 on an
+             MP4 marks the video downloaded)
 Captions     GET /projects/{id}/captions.srt, GET /projects/{id}/captions.vtt
 Thumbnail    GET /projects/{id}/thumbnail.jpg (?download=1), GET/PUT /projects/{id}/thumbnail
 Brand kits   GET/POST /brand-kits, PUT/DELETE /brand-kits/{id}, GET/POST/DELETE /brand-kits/{id}/logo,
@@ -38,10 +45,12 @@ from . import agent as ag
 from . import claude_code
 from . import voice as vc
 from . import brand as br
+from . import broll as bl
 from . import render as rd
+from . import publishing as pb
 from .hub import Hub
 from .jobs import Exports, VoiceJobs, narration_track, thumbnail_image
-from .store import ASPECTS, TRANSITIONS, Store, StoreError, fmt_clock, slugify
+from .store import ASPECTS, MAX_VIDEO_BYTES, TONES, TRANSITIONS, VIDEO_EXT, Store, StoreError, fmt_clock, slugify, tone_of
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -66,9 +75,12 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
     load_env_file(BACKEND_DIR / ".env")
     store = Store()
     hub = Hub(store)
-    renderer = rd.RenderService(os.environ.get("MOTION_SELF_URL", "http://127.0.0.1:8765"), dist_dir)
+    # the page the renderer loads comes from this same server: a copy on another port (TRANSCRIBER_PORT)
+    # renders through itself, never through the app on 8765 (whose built player can be another version)
+    renderer = rd.RenderService(os.environ.get("MOTION_SELF_URL") or f"http://127.0.0.1:{os.environ.get('TRANSCRIBER_PORT', '8765')}", dist_dir)
     exports = Exports(store, renderer, hub, find_ffmpeg)
     voices = VoiceJobs(store, hub, find_ffmpeg)
+    clips = bl.Clips(store, hub, find_ffmpeg)  # uploaded b-roll clips, converted in the background
     agent = ag.Agent(store, renderer, hub, exports)
     atexit.register(renderer.shutdown)
     last_snap: dict[str, tuple[str, float]] = {}  # project -> (what was edited, when), to group quick edits
@@ -82,7 +94,7 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
 
         with agent._lock:
             turns = len(agent._turns)
-        return {"exports": live(exports), "voice": live(voices), "claude": turns}
+        return {"exports": live(exports), "voice": live(voices), "claude": turns, "clips": clips.busy()}
 
     app.state.motion_busy = busy
 
@@ -114,7 +126,9 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
         f = dist_dir / "motion-player.html"
         if not f.exists():
             raise StoreError("The page is not built yet: run `npm run build` in the frontend folder.", 404)
-        return FileResponse(f, media_type="text/html")
+        # no-cache, like the app's page: after a rebuild, a player page the browser kept would load a deleted
+        # script and leave the stage black
+        return FileResponse(f, media_type="text/html", headers={"Cache-Control": "no-cache"})
 
     r = APIRouter(prefix="/api/motion")
 
@@ -140,6 +154,7 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
             "voiceJob": voices.status(pid),
             "renders": exports.renders(pid),
             "totals": chat.get("totals") or {},
+            "script": store.script_state(pid),
         }
 
     # ── health ──
@@ -162,6 +177,9 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
             "defaultEffort": ag.DEFAULT_EFFORT,
             "aspects": list(ASPECTS),
             "transitions": list(TRANSITIONS),
+            "tones": list(TONES),
+            "collectionKinds": pb.KINDS,
+            "levels": list(pb.LEVELS),
         }
 
     # ── projects ──
@@ -179,6 +197,10 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
             body.get("brandKitId"),
             body.get("settings") if isinstance(body.get("settings"), dict) else None,
             float(target) if isinstance(target, (int, float)) and target > 0 else None,
+            body.get("tone") if isinstance(body.get("tone"), str) else None,
+            destination=body.get("destination") if body.get("destination") in ("youtube", "udemy") else None,
+            collection=body.get("collection") if isinstance(body.get("collection"), dict) else None,
+            script_review=body.get("scriptReview") if isinstance(body.get("scriptReview"), bool) else None,
         )
         attachments = []
         source = body.get("sourceText")
@@ -208,12 +230,21 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
 
     @r.patch("/projects/{pid}")
     def patch_project(pid: str, body: dict = Body(...)) -> dict:
-        fields = {k: body[k] for k in ("title", "aspect", "brandKitId", "audio", "settings", "targetSeconds", "destination", "closing") if k in body}
+        fields = {
+            k: body[k]
+            for k in ("title", "aspect", "brandKitId", "audio", "settings", "targetSeconds", "destination", "closing", "scriptReview", "tone", "collection", "status", "details")
+            if k in body
+        }
         if any(k in fields for k in ("aspect", "brandKitId", "audio")):
             not_running(pid)
             snapshot_for_edit(pid, "the video settings")
+        before = tone_of(store.get_project(pid))
         p = store.update_project(pid, fields, body.get("baseVersion"))
         hub.project_changed(pid, p["version"])
+        if "tone" in fields and tone_of(p) != before and store.script_state(pid, p)["narrated"]:
+            # the script was drafted in the old tone: Claude rewrites it only when asked
+            hub.add(pid, {"kind": "note", "text": f"Tone now {tone_of(p)}. The script was written in the {before} tone: ask Claude to rewrite it in the new one (your own words stay as they are unless you say so)."})
+            hub.flush(pid)
         return project_view(pid)
 
     @r.delete("/projects/{pid}")
@@ -223,6 +254,47 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
         store.delete_project(pid)
         hub.forget(pid)
         return {"ok": True}
+
+    # ── YouTube playlists and Udemy courses ──
+
+    @r.get("/collections")
+    def list_collections() -> list[dict]:
+        return store.list_collections()
+
+    @r.post("/collections")
+    def create_collection(body: dict = Body(...)) -> dict:
+        return store.create_collection(str(body.get("kind") or ""), str(body.get("title") or ""))
+
+    @r.patch("/collections/{cid}")
+    def update_collection(cid: str, body: dict = Body(...)) -> dict:
+        """{title} renames it; {meta} sets its own details (a playlist's description; a course's subtitle,
+        description, objectives, requirements, audience and level)."""
+        return store.update_collection(cid, {k: body[k] for k in ("title", "meta") if k in body})
+
+    @r.post("/collections/{cid}/order")
+    def order_collection(cid: str, body: dict = Body(...)) -> list[dict]:
+        ids = body.get("ids")
+        if not isinstance(ids, list):
+            raise StoreError("ids must be the videos' ids, first to last")
+        store.reorder_collection(cid, [str(i) for i in ids])
+        return store.list_collections()
+
+    @r.delete("/collections/{cid}")
+    def delete_collection(cid: str) -> dict:
+        store.delete_collection(cid)
+        return {"ok": True}
+
+    # ── publishing details: one place for everything YouTube and Udemy ask for ──
+
+    @r.get("/projects/{pid}/details")
+    def details_view(pid: str) -> dict:
+        # running: Claude is working on this video (Details waits for "Write with Claude" to finish)
+        return {**store.details_view(pid), "running": agent.running(pid)}
+
+    @r.get("/projects/{pid}/details.md")
+    def details_md(pid: str) -> Response:
+        p = store.get_project(pid)
+        return Response(store.details_markdown(pid), media_type="text/markdown; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{slugify(p["title"])}-details.md"'})
 
     @r.put("/projects/{pid}/scenes/{sid}")
     def edit_scene(pid: str, sid: str, body: dict = Body(...)) -> dict:
@@ -257,6 +329,12 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
         store.get_project(pid)
         out = []
         for f in files[:20]:
+            if Path(f.filename or "").suffix.lower() in VIDEO_EXT:
+                # a b-roll clip: streamed to disk and converted in the background (the list shows it converting)
+                clips.ffmpeg()  # refuses at once when FFmpeg is missing
+                incoming = await bl.save_upload(store, pid, f, MAX_VIDEO_BYTES)
+                out.append(clips.start(pid, incoming, f.filename or "clip.mp4"))
+                continue
             data = await f.read()
             out.append(store.save_asset(pid, f.filename or "file", data))
         return out
@@ -422,6 +500,24 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
     def script_view(pid: str) -> dict:
         return {"markdown": store.script_markdown(pid), "chapters": store.chapters(pid), "docs": store.list_docs(pid)}
 
+    @r.post("/projects/{pid}/script/approve")
+    def script_approve(pid: str) -> dict:
+        """The user approves the script in their own words: Claude may build the scenes now."""
+        not_running(pid)
+        p = store.approve_script(pid)
+        hub.project_changed(pid, p["version"])
+        hub.add(pid, {"kind": "note", "text": "Script approved in your own words: Claude can build the scenes."})
+        hub.flush(pid)
+        return project_view(pid)
+
+    @r.post("/projects/{pid}/script/reopen")
+    def script_reopen(pid: str) -> dict:
+        """Takes the approval back, so Claude waits for the user again before more scene code."""
+        not_running(pid)
+        p = store.reopen_script(pid)
+        hub.project_changed(pid, p["version"])
+        return project_view(pid)
+
     @r.get("/projects/{pid}/docs/{name}")
     def get_doc(pid: str, name: str) -> Response:
         return Response(store.read_doc(pid, name), media_type="text/markdown; charset=utf-8")
@@ -467,8 +563,9 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
 
     @r.get("/projects/{pid}/publish-kit.zip")
     def publish_kit(pid: str) -> Response:
-        """The thumbnail, the captions (SRT and VTT), the chapters (for the description) and YOUTUBE.md, in one
-        zip named after the video. What doesn't exist yet (no thumbnail, no narration) is left out."""
+        """The thumbnail, the captions (SRT and VTT), the chapters (for the description), DETAILS.md (every
+        YouTube and Udemy field) and YOUTUBE.md, in one zip named after the video. What doesn't exist yet (no
+        thumbnail, no narration, no details) is left out."""
         p = store.get_project(pid)
         slug = slugify(p["title"])
         files: list[tuple[str, bytes]] = []
@@ -482,11 +579,14 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
         if chapters:
             lines = [f"{fmt_clock(c['start'])} {c['title']}" for c in chapters]
             files.append((f"{slug}-chapters.txt", ("\n".join(lines) + "\n").encode("utf-8")))
-        for d in store.list_docs(pid):
-            if d["name"].upper() == "YOUTUBE.MD":
-                files.append((d["name"], store.read_doc(pid, d["name"]).encode("utf-8")))
+        if any((p.get("details") or {}).get(k) for k in ("youtube", "udemy")):
+            files.append((f"{slug}-DETAILS.md", store.details_markdown(pid).encode("utf-8")))
+        else:  # a video from before Details: its old YOUTUBE.md, until it has details
+            for d in store.list_docs(pid):
+                if d["name"].upper() == "YOUTUBE.MD":
+                    files.append((d["name"], store.read_doc(pid, d["name"]).encode("utf-8")))
         if not files:
-            raise StoreError("Nothing to download yet: this video has no thumbnail, narration or YouTube details.", 404)
+            raise StoreError("Nothing to download yet: this video has no thumbnail, narration or publishing details.", 404)
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             for name, data in files:
@@ -500,7 +600,7 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
         # narration, sfx (the paper sounds) and loudness (the mix at -14 LUFS) default to on; the music bed is
         # the project's audio setting
         return exports.start(
-            pid, int(body.get("resolution") or 1080), body.get("narration") is not False, body.get("sfx") is not False, body.get("loudness") is not False,
+            pid, int(body.get("resolution") or rd.DEFAULT_RESOLUTION), body.get("narration") is not False, body.get("sfx") is not False, body.get("loudness") is not False,
         )
 
     @r.post("/projects/{pid}/export/cancel")
@@ -509,12 +609,16 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
         return {"ok": True}
 
     @r.get("/projects/{pid}/renders/{name}")
-    def get_render(pid: str, name: str) -> FileResponse:
-        # an exported MP4, or the captions written next to it
+    def get_render(pid: str, name: str, download: int = 0) -> FileResponse:
+        # an exported MP4, or the captions written next to it. The page's download links add ?download=1: an
+        # MP4 fetched that way marks the video downloaded (playing it in the page doesn't)
         types = {".mp4": "video/mp4", ".srt": "application/x-subrip; charset=utf-8", ".vtt": "text/vtt; charset=utf-8"}
         f = store.renders_dir(pid) / Path(name).name
         if f.suffix not in types or ".part" in f.name or ".audio" in f.name or not f.exists():
             raise StoreError("No such file.", 404)
+        if download and f.suffix == ".mp4":
+            p = store.mark_downloaded(pid, f.name)
+            hub.project_changed(pid, p["version"])
         return FileResponse(f, media_type=types[f.suffix], filename=f.name)
 
     # ── brand kits ──

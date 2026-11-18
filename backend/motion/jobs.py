@@ -118,6 +118,14 @@ class VoiceJobs:
         todo = [r for r in status["scenes"] if r["state"] != "voiced" and (not scene_ids or r["id"] in scene_ids)]
         if not todo:
             raise StoreError("Every narrated scene already has its voice.")
+        # a place left for the user's own words ([[you: ...]]) would be read out as it stands
+        p = self.store.get_project(pid)
+        waiting = [s["id"] for s in p["scenes"] if any(s["id"] == r["id"] for r in todo) and vc.slots(s.get("narration") or "")]
+        if waiting:
+            raise StoreError(
+                f"{', '.join(waiting[:12])} still {'has a place' if len(waiting) == 1 else 'have places'} for your own words ([[you: ...]]). "
+                "Write them in (Script > Your words), then generate the voice."
+            )
         needs_api = any(r["state"] in ("none", "changed") for r in todo)
         if needs_api and not vc.api_key():
             raise StoreError("No ElevenLabs key: put ELEVENLABS_API_KEY=... in backend\\.env, then restart the app.", 503)
@@ -214,7 +222,7 @@ class Exports:
             snapshot = dict(job)
         self.hub.emit(pid, {"op": "export", "job": snapshot})
 
-    def start(self, pid: str, resolution: int = 1080, narration: bool = True, sfx: bool = True, loudness: bool = True) -> dict:
+    def start(self, pid: str, resolution: int = rd.DEFAULT_RESOLUTION, narration: bool = True, sfx: bool = True, loudness: bool = True) -> dict:
         """narration False leaves the voice out; sfx False leaves out the paper sounds (rip, page, pop...);
         loudness False skips bringing the mix to -14 LUFS. The music bed is the video's soundtrack setting
         (project.audio)."""

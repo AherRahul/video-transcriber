@@ -26,7 +26,9 @@ import { TextPlugin } from "gsap/TextPlugin";
 import type { Brand, Bundle, BundleScene, PropValue } from "../types";
 import { carryLayer, cameraOf, drawnBox, placeCarry, snapCarries, type CarryLayer, type CarrySnap } from "./carry";
 import { CODE_CSS, buildCode } from "./code";
+import { buildPlainChrome } from "./frame";
 import { hasSurface, inkBand, type Box } from "./geometry";
+import { KIT_CSS, finishKit, kitReady, kitSync, loadKit, makeKit, newKitAssets, prepareKit, type KitAssets, type KitCtx } from "./kit";
 import {
   PAPER_CSS,
   arrowTips,
@@ -212,6 +214,10 @@ export class Runtime {
   private carryLayers = new Map<number, CarryLayer>();
   private carryFrom = new Map<string, Box>();
   private carryHidden: HTMLElement[] = [];
+  /** the explainer kit's files for the loaded video (icons, the cast, drawings), and the media still settling
+   *  after the last seek (a b-roll clip finding its frame) */
+  private kit: KitAssets | null = null;
+  private pending: Promise<void> | null = null;
 
   constructor(stage: HTMLDivElement) {
     this.stage = stage;
@@ -233,12 +239,17 @@ export class Runtime {
     this.applyBrand(bundle);
     await this.loadFonts(bundle.brand);
     if (token !== this.loadToken) return { duration: bundle.duration, errors: [], version: bundle.version };
+    // the explainer kit fetches what the scenes use (icons, the cast, Excalidraw drawings, the sketch fonts)
+    if (!this.kit || this.kit.assetBase !== bundle.assetBase) this.kit = newKitAssets(`${bundle.themeBase}kit/`, bundle.assetBase);
+    const kitErrors = await loadKit(bundle, this.kit);
+    if (token !== this.loadToken) return { duration: bundle.duration, errors: [], version: bundle.version };
     for (const b of this.built) {
       b.tl.kill();
       b.host.remove();
     }
     this.built = [];
     this.errors = document.documentElement.dataset.mode === "render" ? [...this.fontErrors] : [];
+    this.errors.push(...kitErrors);
     this.bundle = bundle;
     this.chrome?.root.remove();
     this.chrome = null;
@@ -262,6 +273,20 @@ export class Runtime {
       });
       this.tearEdge = tearEdgeSvg();
       this.stage.appendChild(this.tearEdge);
+    } else {
+      // the other kits: the logo bottom-left and the web address bottom-right, when the kit has them and the
+      // video's settings show them (frame.ts); a kit without a logo or a url draws nothing, as before
+      const brand = bundle.brand;
+      this.chrome = buildPlainChrome(this.stage, {
+        width: bundle.width,
+        height: bundle.height,
+        aspect: bundle.aspect,
+        wordmark: brand.wordmark || brand.name,
+        iconUrl: brand.iconUrl,
+        logoUrl: brand.logoUrl,
+        url: (brand as FrameBrand).showUrl === false ? "" : brand.endCard?.url || "",
+        showLogo: (brand as FrameBrand).showLogo !== false,
+      });
     }
     bundle.scenes.forEach((scene, i) => {
       const b = this.build(bundle, scene, i > 0 ? bundle.scenes[i - 1] : null);
@@ -374,6 +399,8 @@ export class Runtime {
       Promise.all(imgs.map((img) => (img.complete ? Promise.resolve() : img.decode().catch(() => null)))),
       new Promise((r) => setTimeout(r, 8000)),
     ]);
+    // the kit's media too (b-roll clips), up to 20 s
+    await Promise.race([kitReady(this.built.map((b) => b.root)), new Promise((r) => setTimeout(r, 20000))]);
   }
 
   private resolveAssets(text: string, base: string): string {
@@ -449,7 +476,7 @@ export class Runtime {
     }
     // the markup goes inside the camera (fx.focus moves it); the page's label, the turn's shade and any
     // error box stay outside it, on the page itself
-    shadow.innerHTML = `<style>${BASE_CSS}${paper ? PAPER_CSS : ""}${CODE_CSS}</style><style>${css}</style><div class="scene-root"><div class="scene-cam">${markup}</div><div class="mo-shade"></div></div>`;
+    shadow.innerHTML = `<style>${BASE_CSS}${paper ? PAPER_CSS : ""}${CODE_CSS}${KIT_CSS}</style><style>${css}</style><div class="scene-root"><div class="scene-cam">${markup}</div><div class="mo-shade"></div></div>`;
     const root = shadow.querySelector(".scene-root") as HTMLDivElement;
     const cam = root.querySelector(".scene-cam") as HTMLDivElement;
     const shade = shadow.querySelector(".mo-shade") as HTMLDivElement;
@@ -493,6 +520,15 @@ export class Runtime {
     // the smallest text the layout report accepts (as diagnose measures it): fx.chart sizes its labels from it
     const minText = paper ? 22 : Math.round(Math.min(bundle.width, bundle.height) * 0.028);
     const fx = makeFx(tl, scene.id, sfx, { cam, width: bundle.width, height: bundle.height, content, entrance, minText });
+    // the explainer kit: its markup is drawn (icons, sketch shapes, people) before anything measures the page,
+    // and fx gains its helpers (fx.sketch, fx.array, fx.person, ...)
+    const kit: KitCtx = {
+      sceneId: scene.id, tl, root, cam, width: bundle.width, height: bundle.height, content, minText, paper, duration: scene.duration,
+      assets: this.kit ?? newKitAssets(`${bundle.themeBase}kit/`, bundle.assetBase),
+      sound: fx.sound, mark: entrance, seed: (s: string) => hashString(`${scene.id}:${s}`), errors, fx: fx as unknown as Record<string, unknown>,
+    };
+    prepareKit(kit);
+    Object.assign(fx, makeKit(kit));
 
     // the paper page's label, torn on as the voice starts (a thumbnail is a picture: no label)
     if (paper && scene.kind !== "endscreen" && !thumb && scene.label) {
@@ -527,6 +563,7 @@ export class Runtime {
         errors.push(`Scene ${scene.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    finishKit(kit); // what the kit plans from everything the script set (a person's blinks)
     try {
       fx.finish(); // the camera's moves and the code bands, in time order
     } catch (err) {
@@ -564,7 +601,7 @@ export class Runtime {
         .map((snap) => ({ snap, old: prev.root.querySelector<HTMLElement>(`[data-carry="${CSS.escape(snap.key)}"]`) }))
         .filter((p): p is { snap: CarrySnap; old: HTMLElement } => !!p.old);
       if (!pairs.length) continue;
-      const css = `${BASE_CSS}${paper ? PAPER_CSS : ""}${CODE_CSS}\n${cur.css}`;
+      const css = `${BASE_CSS}${paper ? PAPER_CSS : ""}${CODE_CSS}${KIT_CSS}\n${cur.css}`;
       this.carryLayers.set(i, carryLayer(this.stage, css, bundle.width, bundle.height, pairs));
     }
   }
@@ -609,11 +646,37 @@ export class Runtime {
     this.show(i, Math.max(0, t - this.bundle.scenes[i].start));
   }
 
+  /** What the last seek still waits for (a b-roll clip seeking to its frame), or null when the page is ready. */
+  settled(): Promise<void> | null {
+    return this.pending;
+  }
+
   seekScene(id: string, local: number) {
     const i = this.built.findIndex((b) => b.scene.id === id);
     if (i < 0) throw new Error(`No scene ${id}`);
     this.lastT = this.built[i].scene.start + local;
     this.show(i, local);
+  }
+
+  /**
+   * The page as it stands, as text, for the export: the stage's own markup (which pages show and how far
+   * their page change has got, the frame, the carried copies) and each shown page's inner markup (every
+   * inline style, attribute and word the timeline sets). Two moments with the same text draw the same
+   * pixels, so the export reuses the frame before instead of capturing it again: about two frames in three
+   * of an explainer repeat the one before. Null when something moves by itself (a running CSS animation or
+   * transition, a video, a canvas): then every frame is captured.
+   */
+  frameState(): string | null {
+    if (document.getAnimations().some((a) => a.playState === "running")) return null;
+    let state = this.stage.innerHTML;
+    for (const b of this.built) {
+      if (b.host.style.display === "none") continue;
+      const shadow = b.root.getRootNode();
+      if (!(shadow instanceof ShadowRoot)) return null;
+      if (shadow.querySelector("video, canvas")) return null;
+      state += "\u0000" + shadow.innerHTML;
+    }
+    return state;
   }
 
   /** Shows scene i at its local time; during its page change the previous scene's last frame takes part. */
@@ -639,6 +702,10 @@ export class Runtime {
     if (this.tearEdge) this.tearEdge.style.display = "none";
     if (prev) prev.tl.time(prev.scene.duration, false);
     cur.tl.time(Math.min(local, dur), false);
+    // media that runs by itself (a b-roll clip) goes to the same moment; an export frame waits for it
+    const exact = document.documentElement.dataset.mode === "render";
+    const waits = [kitSync(cur.root, Math.min(local, dur), exact), prev ? kitSync(prev.root, prev.scene.duration, exact) : null].filter(Boolean) as Promise<void>[];
+    this.pending = waits.length ? Promise.all(waits).then(() => undefined) : null;
     if (this.chrome) {
       this.chrome.setPart(cur.scene.part || "");
       this.chrome.setVisible(!(cur.scene.kind === "endscreen" && (!inTransition || local > tdur * 0.5)));
@@ -808,7 +875,9 @@ export class Runtime {
         // nor does a chart's frame (fx.chart): its numbers (tick labels and bar values, the p-chart's own
         // text), its axis titles and its note. Its series names, marks and legend count.
         const frame = el.classList.contains("p-chart") || (!!el.closest(".p-chart") && (el.classList.contains("p-chart-title") || el.classList.contains("p-chart-note-text")));
-        if (!el.classList.contains("p-code") && !frame) out.words += text.split(/\s+/).filter(Boolean).length;
+        // a terminal's session reads like code, and a coding visual's values, indices and pointer names
+        // (kit/ds.ts, kit/sequence.ts) are data, not words
+        if (!el.classList.contains("p-code") && !el.classList.contains("p-term") && !el.closest(".p-ds") && !frame) out.words += text.split(/\s+/).filter(Boolean).length;
         const px = (parseFloat(cs.fontSize) * (rr.width / Math.max(1, (el as HTMLElement).offsetWidth || rr.width))) / scale;
         if (px && px < minPx) out.smallText.push({ id: id2, px: Math.round(px) });
       }
@@ -829,7 +898,10 @@ export class Runtime {
         // hard shadow alone takes 10 px). Measured on the axis where they are apart, when they share the other.
         const gapX = Math.max(a.r.x, c.r.x) - Math.min(a.r.x + a.r.w, c.r.x + c.r.w);
         const gapY = Math.max(a.r.y, c.r.y) - Math.min(a.r.y + a.r.h, c.r.y + c.r.h);
-        if (placed(a.el) && placed(c.el) && Math.max(gapX, gapY) < CROWD && Math.min(gapX, gapY) < 0) out.crowded.push([a.id, c.id]);
+        // the parts of one coding visual (cells side by side, an index under its cell) sit close on purpose
+        const ds = a.el.closest(".p-ds");
+        const kin = !!ds && ds === c.el.closest(".p-ds");
+        if (!kin && placed(a.el) && placed(c.el) && Math.max(gapX, gapY) < CROWD && Math.min(gapX, gapY) < 0) out.crowded.push([a.id, c.id]);
       }
     }
     out.handChart = handCharts(b.root, stageRect, scale);
@@ -1003,7 +1075,8 @@ function penMarks(root: Element, stageRect: DOMRect, scale: number, W: number, H
 function handCharts(root: Element, stageRect: DOMRect, scale: number): string[] {
   const out: string[] = [];
   for (const svg of Array.from(root.querySelectorAll("svg"))) {
-    if (svg.parentElement?.closest("svg") || svg.closest(".p-chart") || svg.classList.contains("p-links")) continue;
+    // the kit's own drawings (data-kit: sketch strokes, an imported Excalidraw drawing) are not charts drawn by hand
+    if (svg.parentElement?.closest("svg") || svg.closest(".p-chart") || svg.classList.contains("p-links") || svg.closest("[data-kit]") || svg.closest(".p-ds")) continue;
     const rr = svg.getBoundingClientRect();
     if (rr.width / scale < 200 || rr.height / scale < 120 || effectiveOpacity(svg, root) < 0.05) continue;
     if (Array.from(svg.querySelectorAll("text, foreignObject")).some((t) => (t.textContent || "").trim())) continue;
@@ -1210,7 +1283,8 @@ function ownText(el: Element): string {
   const walk = (n: Node) => {
     for (const child of Array.from(n.childNodes)) {
       if (child.nodeType === Node.TEXT_NODE) s += child.textContent ?? "";
-      else if (child instanceof Element && !child.hasAttribute("data-id") && !["STYLE", "SCRIPT"].includes(child.tagName)) {
+      // the words of the user's own Excalidraw drawing (data-kit-uncounted) are its own layout: not counted
+      else if (child instanceof Element && !child.hasAttribute("data-id") && !child.hasAttribute("data-kit-uncounted") && !["STYLE", "SCRIPT"].includes(child.tagName)) {
         // split words (SplitText) and line breaks are separate elements: keep a space between them
         const inline = ["SPAN", "B", "I", "EM", "STRONG", "CODE", "SMALL", "SUP", "SUB", "MARK"].includes(child.tagName);
         if (!inline) s += " ";

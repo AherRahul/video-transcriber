@@ -7,7 +7,11 @@ import type {
   BrandKit,
   CaptionFormat,
   ChatState,
+  Collection,
+  CollectionMeta,
   CommentTarget,
+  Destination,
+  DetailsView,
   ExportJob,
   HubOp,
   MotionHealth,
@@ -17,6 +21,7 @@ import type {
   Pronunciation,
   ScriptView,
   ThumbnailSource,
+  Tone,
   VoiceJob,
   VoiceStatus,
 } from "./types";
@@ -59,8 +64,16 @@ export const motionApi = {
     sourceUrl?: string;
     settings?: Record<string, string>;
     targetSeconds?: number;
+    /** how the script speaks: normal, funny, focused or informational */
+    tone?: Tone;
     /** a transcription job whose screenshots come along as layout references (ref-<mm>m<ss>s.jpg assets) */
     framesJob?: string;
+    /** where it goes (a collection decides it when given) */
+    destination?: Destination;
+    /** the playlist or course, the episode number (the end when left out) and the Udemy section */
+    collection?: { id: string; order?: number; section?: string | null } | null;
+    /** whether Claude waits for the user's own words before building scenes (on when left out) */
+    scriptReview?: boolean;
   }) =>
     // references: how many screenshots came along
     call<{ project: Project; attachments: string[]; references: number }>("/projects", json("POST", body)),
@@ -95,6 +108,9 @@ export const motionApi = {
   cancelVoice: (id: string) => call<{ ok: boolean }>(`/projects/${id}/voice/cancel`, { method: "POST" }),
   setPronunciations: (id: string, entries: Pronunciation[]) => call<VoiceStatus>(`/projects/${id}/pronunciations`, json("PUT", { entries })),
   script: (id: string) => call<ScriptView>(`/projects/${id}/script`),
+  /** the user approves the script in their own words (refused while a [[you: ...]] place is open) */
+  approveScript: (id: string) => call<ProjectView>(`/projects/${id}/script/approve`, { method: "POST" }),
+  reopenScript: (id: string) => call<ProjectView>(`/projects/${id}/script/reopen`, { method: "POST" }),
   scriptUrl: (id: string) => `${BASE}/projects/${id}/script.md`,
   doc: async (id: string, name: string) => {
     const res = await fetch(`${BASE}/projects/${id}/docs/${encodeURIComponent(name)}`);
@@ -130,7 +146,7 @@ export const motionApi = {
    * server draws it on the first request after a change, so that one can take 20 s or so. */
   // v changes with the thumbnail's rev and with what it is drawn from (the brand kit, the frame settings):
   // the server sends a versioned link as cacheable for a year, so a stale v would show an old picture
-  // the thumbnail, captions, chapters and YOUTUBE.md in one zip named after the video
+  // the thumbnail, captions, chapters, DETAILS.md and YOUTUBE.md in one zip named after the video
   publishKitUrl: (id: string) => `${BASE}/projects/${id}/publish-kit.zip`,
   thumbnailUrl: (id: string, rev: number, look = "") => `${BASE}/projects/${id}/thumbnail.jpg?v=${rev}${look ? `-${look}` : ""}`,
   /** The HTML and values the thumbnail is drawn from. */
@@ -138,6 +154,22 @@ export const motionApi = {
   /** Saves a new design; the project's thumbnail.rev goes up. baseRev refuses (409) a save over a newer one. */
   putThumbnail: (id: string, body: { html: string; props?: Record<string, unknown>; baseRev?: number }) =>
     call<ThumbnailSource & { warnings?: string[]; version?: number }>(`/projects/${id}/thumbnail`, json("PUT", body)),
+
+  // ── YouTube playlists and Udemy courses, and each video's publishing details ──
+
+  listCollections: () => call<Collection[]>("/collections"),
+  createCollection: (kind: Destination, title: string) => call<Collection>("/collections", json("POST", { kind, title })),
+  /** renames it, or sets its own details (a playlist's description, a course's landing page) */
+  updateCollection: (id: string, body: { title?: string; meta?: CollectionMeta }) => call<Collection>(`/collections/${id}`, json("PATCH", body)),
+  /** the episode order, first to last; returns every collection again */
+  reorderCollection: (id: string, ids: string[]) => call<Collection[]>(`/collections/${id}/order`, json("POST", { ids })),
+  /** its videos stay, in no collection */
+  deleteCollection: (id: string) => call<{ ok: boolean }>(`/collections/${id}`, { method: "DELETE" }),
+  details: (id: string) => call<DetailsView>(`/projects/${id}/details`),
+  /** every YouTube and Udemy field in one Markdown file */
+  detailsMdUrl: (id: string) => `${BASE}/projects/${id}/details.md`,
+  /** an exported MP4's link for downloading: the server marks the video downloaded when it is fetched this way */
+  downloadMp4Url: (url: string) => `${url}${url.includes("?") ? "&" : "?"}download=1`,
 
   listKits: () => call<BrandKit[]>("/brand-kits"),
   createKit: (kit: Partial<BrandKit>, opts: { baseKitId?: string; logoUrl?: string | null } = {}) =>

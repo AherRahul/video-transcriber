@@ -148,7 +148,7 @@ class NarrationTests(unittest.TestCase):
         b = self.store.bundle(self.pid)
         self.assertEqual((b["theme"], b["width"], b["height"]), ("paper", 1600, 900))
         self.assertTrue(b["brand"]["iconUrl"].startswith("/api/motion/brand-kits/algoinsight-paper/icon"))
-        self.assertIn("target length: 10:00; the whole video must run between 9:00 and 15:00", self.store.state_summary(self.pid))
+        self.assertIn("length the user set: 10:00; the whole video must run between 9:00 and 15:00", self.store.state_summary(self.pid))
 
     def test_spoken_text_and_cues(self):
         text, offsets = vc.spoken("An LLM reads text. <cue/> Then the AI answers. <cue/>", [{"written": "LLM", "spoken": "L-L-M"}, {"written": "AI", "spoken": "A-I"}])
@@ -234,8 +234,12 @@ def talk(words: int, start: str = "Meera") -> str:
     return base * max(1, words // n)
 
 
+PLAN = {"shape": "story", "why": "one evening at a food stall shows the whole idea", "minutes": 6, "lengthWhy": "one idea with one worked example"}
+
+
 class SourceTests(unittest.TestCase):
-    """The reference transcript: the points a video must cover, its length and its own wording."""
+    """A reference transcript is research only; the script follows a plan (shape and length for the topic)
+    and waits for the user's own words before any scene code."""
 
     def setUp(self):
         self.store = new_store()
@@ -247,76 +251,773 @@ class SourceTests(unittest.TestCase):
     def attach(self):
         return self.agent._attachment_blocks(self.pid, "transcript-lesson1.txt")
 
-    def test_a_timed_attachment_sets_the_target_and_the_points(self):
+    def test_a_timed_attachment_is_research_only(self):
         blocks = self.attach()
-        self.assertIn("aims for 10:08", blocks[-1]["text"])  # the source's length, inside 10 to 30 minutes
+        self.assertIn("is a reference (10:08 by its timestamps): research for the topic only", blocks[-1]["text"])
+        self.assertIn("Never follow its outline, order, examples or length", blocks[-1]["text"])
         p = self.store.get_project(self.pid)
-        self.assertEqual(p["targetSeconds"], 608)
+        self.assertIsNone(p["targetSeconds"])  # the reference's length sets nothing
+        self.assertTrue(p["scriptReview"])  # a new video waits for the user's words
         src = self.store.get_source(self.pid)
-        self.assertEqual(len(src["lines"]), 6)  # the title and the link are not points
+        self.assertEqual(len(src["lines"]), 6)  # the title and the link are not lines
         self.assertEqual(src["lines"][3], {"t": 270.0, "text": "The time between a request and its answer is called latency."})
-        self.assertEqual(store_mod.target_from_source(200), 600)
-        self.assertEqual(store_mod.target_from_source(4000), 1800)
+        listing, label = self.agent._tool(self.pid, "read_source", {"from": "4:00"})
+        self.assertIn("research for the topic only", listing)
+        self.assertIn("[4:30] The time between a request and its answer is called latency.", listing)
+        self.assertNotIn("NOT COVERED", listing)
+        self.assertEqual(label, "Read the reference (3 lines)")
+        self.assertIn("reference: transcript-lesson1.txt, 10:08, 6 timed lines (research only", self.store.state_summary(self.pid))
 
-    def test_transcript_formats(self):
+    def test_transcript_formats_and_plans(self):
         srt = "1\n00:00:01,000 --> 00:00:04,000\nHello there\nand welcome\n\n2\n00:01:05,500 --> 00:01:08,000\nSecond cue\n"
         self.assertEqual(store_mod.parse_source(srt), [{"t": 1.0, "text": "Hello there and welcome"}, {"t": 65.0, "text": "Second cue"}])
         self.assertEqual(store_mod.parse_source("1:02:03 Late in a long talk\nstill talking")[0], {"t": 3723.0, "text": "Late in a long talk still talking"})
-        self.assertEqual(store_mod.clean_covers(["1:40-2:17", "2:30", " 0:09 to 0:03 "]), ["1:40-2:17", "2:30", "0:03-0:09"])
-        with self.assertRaises(StoreError):
-            store_mod.clean_covers(["the start"])
-        with self.assertRaises(StoreError):
-            store_mod.clean_skips([{"range": "9:40"}])  # a skip needs its reason
+        self.assertEqual(store_mod.clean_plan({**PLAN, "shape": "Story"}), {**PLAN, "minutes": 6.0})
+        for bad in ({**PLAN, "shape": "listicle"}, {**PLAN, "why": ""}, {**PLAN, "minutes": "long"}, {**PLAN, "minutes": 90}, "story"):
+            with self.assertRaises(StoreError):
+                store_mod.clean_plan(bad)
 
-    def test_scene_code_waits_for_a_full_own_script(self):
+    def test_scene_code_waits_for_the_plan_the_wording_and_the_users_words(self):
         self.attach()
         self.store.write_storyboard(self.pid, [
-            {"id": "a", "name": "Models", "idea": "x", "transition": "tear", "narration": talk(60), "covers": ["0:00-0:09"]},
+            {"id": "a", "name": "The queue", "idea": "x", "transition": "tear", "narration": talk(60)},
             {"id": "b", "name": "Latency", "idea": "y", "transition": "turn", "narration": talk(60, "Kabir")},
         ])
-        review = self.store.plan_review(self.pid)
-        joined = " ".join(review["problems"])
-        self.assertIn("must run at least 9:07", joined)  # 90 percent of 10:08
-        self.assertIn("3 of the source's 6 timed lines", joined)
-        self.assertIn("[4:30] The time between", joined)
+        # no plan yet: the shape and length come first
+        self.assertIn("Choose this video's shape and length for its topic first", " ".join(self.store.plan_review(self.pid)["problems"]))
         with self.assertRaises(StoreError) as refused:
             self.agent._tool(self.pid, "write_scene", {"id": "a", "html": SCENE})
         self.assertIn("isn't ready for scene code", str(refused.exception))
-        self.assertIn("before any scene code", self.store.state_summary(self.pid))
 
-        # copying the source word for word is refused too
+        # copying the reference word for word is refused
+        self.store.write_storyboard(self.pid, [
+            {"id": "a", "name": "The queue", "idea": "x", "transition": "tear"},
+            {"id": "b", "name": "Latency", "idea": "y", "transition": "turn"},
+        ], plan=PLAN)
         self.store.write_script(self.pid, [{"id": "b", "narration": "A model is a function whose behavior is learned from data, not written by a developer."}])
-        self.assertIn('b: "a model is a function whose behavior is learned from data not written by a developer"', " ".join(self.store.plan_review(self.pid)["problems"]))
+        joined = " ".join(self.store.plan_review(self.pid)["problems"])
+        self.assertIn('repeat the reference word for word', joined)
+        self.assertIn('b: "a model is a function whose behavior is learned from data not written by a developer"', joined)
 
-        # the whole script, in its own words, covering or skipping every line: the build may start
-        self.store.write_script(
-            self.pid,
-            [{"id": "a", "narration": talk(800), "covers": ["0:00-0:09"]}, {"id": "b", "narration": talk(800, "Kabir"), "covers": ["4:30", "10:08"]}],
-            source_skips=[{"range": "9:40", "reason": "a plug for their channel"}],
-        )
+        # an own draft with a place for the user's words: no problems, but it waits for the user
+        content, _ = self.agent._tool(self.pid, "write_script", {"scenes": [
+            {"id": "a", "narration": talk(60)},
+            {"id": "b", "narration": talk(40, "Kabir") + " [[you: the interview where you got latency wrong, two sentences]]"},
+        ]})
+        self.assertIn("1 place left for the user's own words", content)
+        self.assertIn("Now stop: the user puts the script in their own words", content)
         review = self.store.plan_review(self.pid)
-        self.assertEqual(review["problems"], [], review["problems"])
-        self.assertEqual((review["coverage"]["covered"], review["coverage"]["skipped"]), (5, 1))
+        self.assertEqual(review["problems"], [])
+        self.assertEqual(review["waiting"]["slots"], [{"id": "b", "name": "Latency", "asks": ["the interview where you got latency wrong, two sentences"]}])
+        self.assertEqual(vc.check_narration("Kabir waits. [[you: your number, like 42 ms]]"), [])  # a place isn't narration yet
+        with self.assertRaises(StoreError) as refused:
+            self.agent._tool(self.pid, "write_scene", {"id": "a", "html": SCENE})
+        self.assertIn("puts the script in their own words and approves it", str(refused.exception))
+        state = self.store.state_summary(self.pid)
+        self.assertIn("script: waiting for the user to put it in their own words and approve it (0 of 2 narrated scenes rewritten, 1 place left", state)
+        self.assertIn('plan: shape story (one evening at a food stall shows the whole idea); about 6 min (one idea with one worked example)', state)
+
+        # the voice and the approval both refuse an open place
+        from motion.jobs import VoiceJobs
+
+        with self.assertRaises(StoreError) as refused:
+            VoiceJobs(self.store, self.hub, lambda: None).start(self.pid)
+        self.assertIn("b still has a place for your own words", str(refused.exception))
+        with self.assertRaises(StoreError) as refused:
+            self.store.approve_script(self.pid)
+        self.assertIn("1 place still waits for your own words (b)", str(refused.exception))
+
+        # the user writes it in their own words: those are theirs, and Claude can't change them unasked
+        p = self.store.get_project(self.pid)
+        rev = next(s for s in p["scenes"] if s["id"] == "b")["rev"]
+        self.store.edit_scene(self.pid, "b", {"narration": talk(40, "Kabir") + " I once said latency was the same as speed, and the interviewer stopped me."}, rev)
+        self.assertEqual(self.store.script_state(self.pid)["byUser"], 1)
+        with self.assertRaises(StoreError) as refused:
+            self.agent._tool(self.pid, "write_script", {"scenes": [{"id": "b", "narration": talk(30, "Kabir")}]})
+        self.assertIn("in the user's own words", str(refused.exception))
+        self.agent._tool(self.pid, "write_script", {"scenes": [{"id": "b", "label": "Latency, really"}]})  # no narration: fine
+        self.assertTrue(next(s for s in self.store.get_project(self.pid)["scenes"] if s["id"] == "b")["byUser"])
+        self.assertIn("- your words", self.store.script_markdown(self.pid))
+
+        # approved: the scenes may be built, and the user's words stay as they are
+        p = self.store.approve_script(self.pid)
+        self.assertTrue(p["script"]["approved"])
+        self.assertIsNone(self.store.plan_review(self.pid)["waiting"])
         content, _ = self.agent._tool(self.pid, "write_scene", {"id": "a", "html": SCENE})
         self.assertIn("Scene a saved", content)
-        listing, _ = self.agent._tool(self.pid, "read_source", {"from": "4:00"})
-        self.assertIn("[4:30] The time between a request and its answer is called latency.  <- b", listing)
-        self.assertIn("[9:40] Like and subscribe for more videos like this one.  <- skipped", listing)
+        self.assertIn("script: approved by the user (1 of 2 narrated scenes in their own words", self.store.state_summary(self.pid))
         md = self.store.script_markdown(self.pid)
-        self.assertIn("5 of 6 timed lines covered, 1 skipped, 0 not covered", md)
-        self.assertIn("Source: 4:30, 10:08", md)
+        self.assertIn("Shape: story (one evening at a food stall shows the whole idea). Length: about 6 min (one idea with one worked example).", md)
+        self.assertNotIn("Source coverage", md)
 
-        # rewriting a scene that already has code is an edit: never held up by the script check
-        self.store.write_script(self.pid, [{"id": "b", "narration": talk(30, "Kabir")}])
-        self.assertTrue(self.store.plan_review(self.pid)["problems"])
-        self.agent._tool(self.pid, "write_scene", {"id": "a", "html": SCENE})
+        # asked by the user, Claude may change their words (and they are Claude's again)
+        self.agent._tool(self.pid, "write_script", {"scenes": [{"id": "b", "narration": talk(30, "Kabir")}], "replaceOwnWords": True})
+        self.assertFalse(next(s for s in self.store.get_project(self.pid)["scenes"] if s["id"] == "b")["byUser"])
+        self.store.reopen_script(self.pid)
+        self.assertTrue(self.store.script_state(self.pid)["waiting"])  # b has no code yet: Claude waits for the user again
+        self.assertFalse(self.store.get_project(self.pid)["script"]["approved"])
+
+    def test_only_a_length_the_user_set_is_enforced(self):
+        self.attach()
+        self.store.update_project(self.pid, {"scriptReview": False})
+        self.store.write_storyboard(self.pid, [{"id": "a", "name": "Queue", "idea": "x", "transition": "tear", "narration": talk(60)}])
+        self.assertEqual(self.store.plan_review(self.pid)["problems"], [])  # the topic decides: no length is forced
+        self.store.update_project(self.pid, {"targetSeconds": 600})
+        joined = " ".join(self.store.plan_review(self.pid)["problems"])
+        self.assertIn("the length the user set (10:00) needs at least 9:00", joined)
+        self.assertIn("never pad", joined)
+        self.assertIn("length the user set: 10:00", self.store.state_summary(self.pid))
 
     def test_a_short_from_a_long_talk(self):
         self.attach()
         p, _ = self.store.write_storyboard(self.pid, [{"id": "a", "name": "Reel", "idea": "x", "transition": "fade", "duration": 30}], target_minutes=0.5)
         self.assertEqual(p["targetSeconds"], 30)
-        self.assertEqual(self.store.plan_review(self.pid)["problems"], [])  # a short needn't cover every point
+        self.assertEqual(self.store.plan_review(self.pid)["problems"], [])  # a silent short has no script to wait for
         self.agent._tool(self.pid, "write_scene", {"id": "a", "html": SCENE})
+
+    def test_the_other_videos_shapes_are_in_the_state(self):
+        other = self.store.create_project("Older video", "16:9", "algoinsight-paper")["id"]
+        self.store.write_storyboard(other, [{"id": "a", "name": "One", "idea": "x", "transition": "tear", "narration": talk(30)}], plan={**PLAN, "shape": "compare"})
+        old = self.store.create_project("Before plans", "16:9", "algoinsight-paper")["id"]
+        self.store.write_storyboard(old, [{"id": "a", "name": "One", "idea": "x", "transition": "tear", "narration": talk(30)}])
+        line = next(ln for ln in self.store.state_summary(self.pid).splitlines() if ln.startswith("the user's other videos"))
+        self.assertIn('"Older video" compare', line)
+        self.assertIn('"Before plans" shape not recorded', line)
+
+    def test_a_video_from_before_the_review_doesnt_wait(self):
+        p = self.store.get_project(self.pid)
+        p.pop("scriptReview")
+        store_mod.write_json(self.store._dir(self.pid) / "project.json", p)
+        self.store.write_storyboard(self.pid, [{"id": "a", "name": "Queue", "idea": "x", "transition": "tear", "narration": talk(60) + " [[you: a story]]"}])
+        review = self.store.plan_review(self.pid)
+        self.assertEqual(review["problems"], [])  # no plan needed
+        self.assertIsNone(review["waiting"])
+        self.agent._tool(self.pid, "write_scene", {"id": "a", "html": SCENE})
+
+
+class ToneTests(unittest.TestCase):
+    """The script's tone: normal, funny, focused or informational, picked per video."""
+
+    def test_tone_on_the_project_and_in_what_claude_sees(self):
+        store = new_store()
+        pid = store.create_project("Tones", "16:9", "algoinsight-paper")["id"]
+        self.assertEqual(store.get_project(pid)["tone"], "normal")
+        self.assertEqual(store.create_project("Funny", "16:9", tone="funny")["tone"], "funny")
+        self.assertEqual(store.create_project("Odd", "16:9", tone="sarcastic")["tone"], "normal")
+        with self.assertRaises(StoreError):
+            store.update_project(pid, {"tone": "sarcastic"})
+        store.update_project(pid, {"tone": "informational"})
+        self.assertIn("tone: informational (research and technical sources decoded in simple English", store.state_summary(pid))
+        self.assertIn("Tone: informational.", store.script_markdown(pid))
+        p = store.get_project(pid)
+        p.pop("tone")  # a video made before tones
+        self.assertEqual(store_mod.tone_of(p), "normal")
+
+    def test_a_new_tone_after_the_script_leaves_a_note(self):
+        from fastapi.testclient import TestClient
+
+        import app
+
+        c = TestClient(app.app)
+        r = c.post("/api/motion/projects", json={"title": "Tone note", "brandKitId": "algoinsight-paper", "tone": "focused"})
+        pid = r.json()["project"]["id"]
+        self.assertEqual(r.json()["project"]["tone"], "focused")
+        self.assertEqual(c.patch(f"/api/motion/projects/{pid}", json={"tone": "funny"}).json()["project"]["tone"], "funny")
+        notes = [e["text"] for e in c.get(f"/api/motion/projects/{pid}/chat").json()["log"] if e.get("kind") == "note"]
+        self.assertEqual(notes, [])  # no script yet: nothing to rewrite
+        Store(store_mod.DATA_DIR).write_storyboard(pid, [{"id": "a", "name": "One", "idea": "x", "transition": "tear", "narration": "Meera waits in the queue."}])
+        c.patch(f"/api/motion/projects/{pid}", json={"tone": "informational"})
+        notes = [e["text"] for e in c.get(f"/api/motion/projects/{pid}/chat").json()["log"] if e.get("kind") == "note"]
+        self.assertTrue(any("Tone now informational. The script was written in the funny tone" in n for n in notes), notes)
+        self.assertEqual(c.patch(f"/api/motion/projects/{pid}", json={"tone": "loud"}).status_code, 400)
+        c.delete(f"/api/motion/projects/{pid}")
+
+    def test_the_prompt_says_what_each_tone_asks_for(self):
+        from motion.prompts import SYSTEM_PROMPT
+
+        section = SYSTEM_PROMPT[SYSTEM_PROMPT.index("# Tone"):SYSTEM_PROMPT.index("# Editing")]
+        for tone in store_mod.TONES:
+            self.assertIn(f"- {tone}:", section)
+        for phrase in (
+            "Every tone keeps simple, easy English",
+            "Facts stay serious: a number or a claim is never the joke",
+            "no jokes about religion, politics, caste, gender, looks, illness or tragedies",
+            "Every sentence teaches something",
+            "name it (title, authors, year, where it appeared)",
+            "Keep what the paper claims apart from your reading of it",
+        ):
+            self.assertIn(phrase, section)
+        self.assertIn("paper (a research paper decoded", SYSTEM_PROMPT)
+        self.assertIn("in the video's tone (see Tone)", SYSTEM_PROMPT)
+
+
+class PublishingTests(unittest.TestCase):
+    """Playlists and courses, each video's place in one, its status marks and its publishing details."""
+
+    def episodes(self, store, cid):
+        return [(v["title"], v["episode"]) for v in next(c for c in store.list_collections() if c["id"] == cid)["videos"]]
+
+    def test_videos_are_numbered_in_their_playlist(self):
+        store = new_store()
+        pl = store.create_collection("youtube", "AI for Everyone")
+        with self.assertRaises(StoreError):
+            store.create_collection("youtube", "ai for everyone")  # the same name twice
+        with self.assertRaises(StoreError):
+            store.create_collection("vimeo", "Nope")
+        a = store.create_project("One", "16:9", collection={"id": pl["id"]})
+        b = store.create_project("Two", "16:9", collection={"id": pl["id"]})
+        c = store.create_project("Three", "16:9", collection={"id": pl["id"]})
+        self.assertEqual(self.episodes(store, pl["id"]), [("One", 1), ("Two", 2), ("Three", 3)])
+        self.assertEqual(c["collection"]["order"], 3)
+        # a new video at episode 2 moves the others down
+        d = store.create_project("New two", "16:9", collection={"id": pl["id"], "order": 2})
+        self.assertEqual(self.episodes(store, pl["id"]), [("One", 1), ("New two", 2), ("Two", 3), ("Three", 4)])
+        # moving one later, then taking one out, closes the gaps
+        store.update_project(a["id"], {"collection": {"id": pl["id"], "order": 3}})
+        self.assertEqual(self.episodes(store, pl["id"]), [("New two", 1), ("Two", 2), ("One", 3), ("Three", 4)])
+        store.update_project(b["id"], {"collection": None})
+        self.assertEqual(self.episodes(store, pl["id"]), [("New two", 1), ("One", 2), ("Three", 3)])
+        store.reorder_collection(pl["id"], [c["id"], d["id"]])
+        self.assertEqual(self.episodes(store, pl["id"]), [("Three", 1), ("New two", 2), ("One", 3)])
+        store.delete_project(c["id"])
+        self.assertEqual(self.episodes(store, pl["id"]), [("New two", 1), ("One", 2)])
+        place = store.placement(a["id"])
+        self.assertEqual((place["episode"], place["count"], place["previous"], place["next"]), (2, 2, "New two", None))
+        summary = store.state_summary(a["id"])
+        self.assertIn('placement: episode 2 of 2 in the YouTube playlist "AI for Everyone" (before it: "New two"; the last one so far)', summary)
+        self.assertIn('the episodes in order: 1 "New two"; 2 "One"', summary)
+        self.assertIn("has no description yet (write_details collection", summary)
+        store.delete_collection(pl["id"])
+        self.assertIsNone(store.get_project(a["id"])["collection"])
+        self.assertIn("placement: in no playlist or course", store.state_summary(a["id"]))
+
+    def test_a_udemy_course_makes_a_udemy_video_in_its_section(self):
+        store = new_store()
+        course = store.create_collection("udemy", "System design from zero")
+        a = store.create_project("Load balancers", "16:9", "algoinsight-paper", collection={"id": course["id"], "section": "Scaling"})
+        self.assertEqual(a["destination"], "udemy")
+        self.assertFalse(any(store.get_project(a["id"])["closing"].values()))  # no logo, address or end screen
+        b = store.create_project("Caches", "16:9", "algoinsight-paper", collection={"id": course["id"]})
+        self.assertEqual(b["collection"]["section"], "Scaling")  # the section of the lecture before it
+        self.assertIn('lecture 2 of 2 in the Udemy course "System design from zero", section "Scaling"', store.state_summary(b["id"]))
+        # back to a YouTube playlist: a YouTube video again, with its end screen
+        pl = store.create_collection("youtube", "Daily")
+        p = store.update_project(b["id"], {"collection": {"id": pl["id"]}})
+        self.assertEqual((p["destination"], p["closing"]["endscreen"]), ("youtube", True))
+        self.assertEqual(self.episodes(store, course["id"]), [("Load balancers", 1)])
+        self.assertEqual(store.create_project("Plain udemy", "16:9", destination="udemy")["destination"], "udemy")
+
+    def test_downloaded_and_uploaded_marks(self):
+        store = new_store()
+        pid = store.create_project("Marks", "16:9")["id"]
+        self.assertEqual(store.list_projects()[0]["progress"]["stage"], "new")
+        store.mark_downloaded(pid, "marks-3840x2160-v4.mp4")
+        st = store.get_project(pid)["status"]
+        self.assertEqual(st["downloadedFile"], "marks-3840x2160-v4.mp4")
+        with self.assertRaises(StoreError):
+            store.update_project(pid, {"status": {"uploadUrl": "youtube.com/watch"}})
+        store.update_project(pid, {"status": {"uploadUrl": "https://youtu.be/abc123"}})
+        row = store.list_projects()[0]
+        self.assertTrue(row["progress"]["uploaded"] and row["progress"]["downloaded"])
+        self.assertEqual(row["progress"]["stage"], "uploaded")
+        self.assertIn("status: uploaded (https://youtu.be/abc123)", store.state_summary(pid))
+        store.update_project(pid, {"status": {"uploaded": False}})
+        self.assertNotIn("uploadUrl", store.get_project(pid)["status"])
+
+    def test_details_are_plain_text_with_live_chapters(self):
+        store = new_store()
+        pid = store.create_project("Details", "16:9", "algoinsight-paper")["id"]
+        store.write_storyboard(pid, [
+            {"id": "a", "name": "One", "idea": "x", "part": "Part 1 · The queue", "narration": "Meera waits in the queue."},
+            {"id": "b", "name": "Two", "idea": "y", "part": "Part 2 · The fix", "narration": "Then the line moves."},
+        ])
+        p, warnings = store.write_details(pid, youtube={
+            "titles": ["Why your queue is slow and how to fix it", "Short", "Short"],
+            "primaryKeyword": "queue wait time",
+            "description": "## Why queues get slow\n\nThe **queue wait time** explained.\n\nIn this video:\n* Where the wait comes from\n* The fix\n\n{chapters}\n\nRead [the paper](https://example.org/paper).",
+            "tags": ["queues"] * 3,
+            "hashtags": ["Queues", "#system design", "#queues"],
+            "unknown": "dropped",
+        })
+        yt = p["details"]["youtube"]
+        self.assertEqual(yt["title"], "Why your queue is slow and how to fix it")  # the first option until one is picked
+        self.assertEqual(yt["titles"], ["Why your queue is slow and how to fix it", "Short"])  # repeats dropped
+        self.assertEqual(yt["hashtags"], ["#Queues", "#systemdesign"])
+        self.assertEqual(yt["tags"], ["queues"])
+        self.assertNotIn("unknown", yt)
+        # Markdown is taken out: YouTube shows it as typed
+        self.assertEqual(
+            yt["description"],
+            "Why queues get slow\n\nThe queue wait time explained.\n\nIn this video:\n- Where the wait comes from\n- The fix\n\n{chapters}\n\nRead the paper: https://example.org/paper.",
+        )
+        for w in ("give 3 to 5 title options", "1 tags: aim for 10 to 15", "2 hashtags: use 3 to 5", "the description has", 'the title doesn\'t carry the main keyword "queue wait time"'):
+            self.assertTrue(any(w in x for x in warnings), (w, warnings))
+        desc = store.details_view(pid)["youtubeDescription"]
+        self.assertIn("The fix\n\nChapters\n0:00 The queue\n0:", desc)  # the chapters where {chapters} was, named by their parts
+        self.assertNotIn("{chapters}", desc)
+        self.assertTrue(desc.endswith("#Queues #systemdesign"))
+        self.assertIn('publishing details (youtube): written, title "Why your queue is slow', store.state_summary(pid))
+        # the user's own text is used as it is, its chapter lines still follow the video
+        mine = desc.replace("The queue wait time explained.", "My own words about the queue wait time.").replace("0:00 The queue", "0:00 Old name")
+        store.update_project(pid, {"details": {"youtube": {"post": mine}}})
+        view = store.details_view(pid)
+        self.assertIn("My own words about the queue wait time.", view["youtubeDescription"])
+        self.assertIn("0:00 The queue", view["youtubeDescription"])
+        self.assertNotIn("Old name", view["youtubeDescription"])
+        # Claude writing a new description replaces the hand-edited one
+        store.write_details(pid, youtube={"description": "A new post about the queue wait time."})
+        self.assertNotIn("post", store.get_project(pid)["details"]["youtube"])
+        # Udemy: the quiz needs four options and the answer; AlgoInsight never appears
+        _, warnings = store.write_details(pid, udemy={
+            "lectureTitle": "Queues: where the wait comes from",
+            "objectives": ["Explain queueing delay", "Choose a fix"],
+            "quiz": [{"question": "What grows the wait?", "options": ["Load", "Colour"], "answer": 5, "why": "x"}],
+            "lectureDescription": "See it on AlgoInsight.",
+        })
+        self.assertTrue(any("4 options" in w for w in warnings), warnings)
+        self.assertTrue(any("can't name AlgoInsight" in w for w in warnings), warnings)
+        md = store.details_markdown(pid)
+        self.assertIn("## YouTube", md)
+        self.assertIn("Title:\nWhy your queue is slow and how to fix it\n", md)
+        self.assertIn("## Udemy", md)
+        self.assertIn("By the end of this lecture you will be able to:\n- Explain queueing delay", md)
+        self.assertNotIn("**", md)
+        # the course's own details, only for a video in one
+        _, warnings = store.write_details(pid, collection={"title": "x"})
+        self.assertIn("collection details not saved: this video is in no playlist or course", warnings)
+
+    def test_seo_checks_and_invisible_characters(self):
+        from motion import publishing as pb
+
+        self.assertEqual(pb.keyword_missing("chatgpt training data", "Where ChatGPT's training data comes from"), [])
+        self.assertEqual(pb.keyword_missing("load balancing", "Load balancers, simply"), ["balancing"])
+        store = new_store()
+        c = store.create_collection("youtube", "AI​​ System Design")
+        self.assertEqual(c["title"], "AI System Design")
+        good = " ".join(["word"] * 240)
+        warnings = pb.details_warnings("youtube", {
+            "titles": ["Load balancing explained with one real outage", "Load balancing: the three algorithms", "Load balancing in system design interviews"],
+            "title": "Load balancing explained with one real outage",
+            "primaryKeyword": "load balancing",
+            "description": "Load balancing, explained with one real outage. " + good,
+            "hashtags": ["#SystemDesign", "#LoadBalancing", "#Backend"],
+            "tags": [f"tag {i}" for i in range(12)],
+        })
+        self.assertEqual(warnings, [])
+
+    def test_thumbnail_colour_check(self):
+        self.assertEqual(store_mod.thumbnail_colour_warnings({"pale": 0.2, "dark": 0.5, "vivid": 0.2}), [])
+        pale = store_mod.thumbnail_colour_warnings({"pale": 0.8, "dark": 0.05, "vivid": 0.05})
+        self.assertTrue(any("80% of the thumbnail is pale" in w for w in pale), pale)
+        self.assertTrue(any("Only 10% of it is dark or strongly coloured" in w for w in pale), pale)
+
+    def test_the_api_places_marks_and_downloads(self):
+        from fastapi.testclient import TestClient
+
+        import app
+
+        c = TestClient(app.app)
+        course = c.post("/api/motion/collections", json={"kind": "udemy", "title": "API course " + str(time.time())}).json()
+        r = c.post("/api/motion/projects", json={"title": "API lecture", "tone": "focused", "collection": {"id": course["id"], "section": "Basics"}, "scriptReview": False, "targetSeconds": 600})
+        p = r.json()["project"]
+        self.assertEqual((p["destination"], p["tone"], p["scriptReview"], p["targetSeconds"]), ("udemy", "focused", False, 600))
+        pid = p["id"]
+        self.assertEqual(c.patch(f"/api/motion/collections/{course['id']}", json={"meta": {"level": "Beginner", "subtitle": "s" * 300}}).json()["meta"]["subtitle"], "s" * 120)
+        listed = next(x for x in c.get("/api/motion/collections").json() if x["id"] == course["id"])
+        self.assertEqual([(v["title"], v["episode"], v["section"]) for v in listed["videos"]], [("API lecture", 1, "Basics")])
+        # a download from the page marks it; playing it doesn't
+        renders = Store(store_mod.DATA_DIR).renders_dir(pid)
+        (renders / "api-lecture-1920x1080-v1.mp4").write_bytes(b"\0" * 64)
+        c.get(f"/api/motion/projects/{pid}/renders/api-lecture-1920x1080-v1.mp4")
+        self.assertNotIn("downloadedAt", c.get(f"/api/motion/projects/{pid}").json()["project"].get("status") or {})
+        c.get(f"/api/motion/projects/{pid}/renders/api-lecture-1920x1080-v1.mp4?download=1")
+        self.assertEqual(c.get(f"/api/motion/projects/{pid}/details").json()["status"]["downloadedFile"], "api-lecture-1920x1080-v1.mp4")
+        c.patch(f"/api/motion/projects/{pid}", json={"details": {"udemy": {"lectureTitle": "Queues"}}})
+        self.assertIn("Lecture title:\nQueues", c.get(f"/api/motion/projects/{pid}/details.md").text)
+        self.assertFalse(c.get(f"/api/motion/projects/{pid}/details").json()["running"])
+        self.assertEqual(c.delete(f"/api/motion/collections/{course['id']}").json(), {"ok": True})
+        c.delete(f"/api/motion/projects/{pid}")
+
+    def test_the_prompt_asks_for_the_details_like_a_creator(self):
+        from motion.prompts import SYSTEM_PROMPT, TOOLS
+
+        section = SYSTEM_PROMPT[SYSTEM_PROMPT.index("# Publishing details"):SYSTEM_PROMPT.index("# The plain theme")]
+        for phrase in (
+            "a top educational creator",
+            "Everything is plain text",
+            "at most 70 characters",
+            "200 to 350 words",
+            "A line {chapters} where the chapters go",
+            "The episodes either side by their titles",
+            "Hashtags: 3 to 5",
+            "10 to 15 phrases",
+            "four options, one clearly right",
+            "Nothing about AlgoInsight",
+        ):
+            self.assertIn(phrase, section)
+        thumb = SYSTEM_PROMPT[SYSTEM_PROMPT.index("# The thumbnail"):SYSTEM_PROMPT.index("# Publishing details")]
+        for phrase in ("Concept first", "1 to 4 words", "fills 40 to 60 percent of the frame", "never the pale paper alone", "the feed view", "EP 4"):
+            self.assertIn(phrase, thumb)
+        tool = next(t for t in TOOLS if t["name"] == "write_details")
+        self.assertEqual(set(tool["input_schema"]["properties"]["youtube"]["properties"]), {"titles", "title", "primaryKeyword", "description", "hashtags", "tags"})
+        self.assertNotIn("YOUTUBE.md document", SYSTEM_PROMPT)
+
+
+class BrollTests(unittest.TestCase):
+    """B-roll: the user's clips and free stock, converted for exact seeking (backend/motion/broll.py)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ff = _ffmpeg()
+
+    def clip(self, name: str, seconds: float = 2.0, size: str = "1280x720", rate: int = 25, audio: bool = True) -> Path:
+        """A test clip: testsrc2 (a moving picture) with a tone, made by FFmpeg."""
+        import subprocess
+
+        if not self.ff:
+            self.skipTest("FFmpeg not found")
+        out = Path(tempfile.mkdtemp(dir=TMP)) / name
+        args = [self.ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=size={size}:rate={rate}:duration={seconds}"]
+        if audio:
+            args += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}", "-shortest"]
+        args += ["-pix_fmt", "yuv420p", str(out)]
+        subprocess.run(args, check=True, timeout=120)
+        return out
+
+    def test_the_copy_is_made_for_exact_seeking(self):
+        from motion import broll as bl
+
+        args = bl.convert_args("ffmpeg", Path("in.mov"), Path("out.mp4"), 30, start=1.5, seconds=4)
+        joined = " ".join(args)
+        for piece in ("-an", "-g 10", "-keyint_min 10", "-sc_threshold 0", "-bf 0", "-color_range tv", "-pix_fmt yuv420p", "fps=30", "out_range=tv", "-ss 1.500", "-t 4.000", "+faststart"):
+            self.assertIn(piece, joined)
+        self.assertIn("min(3840/iw,2160/ih)", joined)  # never larger than 4K, never grown
+        self.assertEqual((bl.clip_fps(29.97), bl.clip_fps(None), bl.clip_fps(120), bl.clip_fps(0.5)), (29.97, 30.0, 30.0, 30.0))
+        facts = bl.probe_text("Duration: 00:01:02.50, start: 0\n  Stream #0:0: Video: h264 (High), yuv420p, 1920x1080, 25 fps, 25 tbr")
+        self.assertEqual(facts, {"seconds": 62.5, "width": 1920, "height": 1080, "fps": 25.0})
+
+    def test_a_real_clip_converts_silent_with_a_keyframe_every_10_frames(self):
+        import subprocess
+
+        from motion import broll as bl
+
+        src = self.clip("phone.mov", seconds=2.0, rate=25)
+        dst = src.with_name("phone.mp4")
+        facts = bl.convert(self.ff, src, dst)
+        self.assertEqual((facts["width"], facts["height"], facts["fps"]), (1280, 720, 25.0))
+        self.assertAlmostEqual(facts["seconds"], 2.0, delta=0.1)
+        probe = bl.ffprobe_exe(self.ff)
+        if probe:
+            streams = subprocess.run([probe, "-v", "error", "-show_entries", "stream=codec_type,color_range,pix_fmt", "-of", "json", str(dst)], capture_output=True, text=True, timeout=60).stdout
+            info = json.loads(streams)["streams"]
+            self.assertEqual([s["codec_type"] for s in info], ["video"])  # no sound
+            self.assertEqual((info[0]["pix_fmt"], info[0].get("color_range")), ("yuv420p", "tv"))
+            kinds = subprocess.run([probe, "-v", "error", "-select_streams", "v:0", "-show_entries", "frame=pict_type", "-of", "csv=p=0", str(dst)], capture_output=True, text=True, timeout=60).stdout.split()
+            keys = [i for i, k in enumerate(kinds) if k.startswith("I")]
+            self.assertEqual(keys, list(range(0, len(kinds), 10)))
+            self.assertNotIn("B", "".join(kinds))
+        # a part of it, trimmed
+        part = bl.convert(self.ff, src, src.with_name("part.mp4"), start=0.5, seconds=1.0)
+        self.assertAlmostEqual(part["seconds"], 1.0, delta=0.1)
+
+    def test_clips_in_the_store_and_what_claude_sees(self):
+        from motion import broll as bl
+
+        store = new_store()
+        pid = store.create_project("Clips", "16:9", "algoinsight-paper")["id"]
+        with self.assertRaises(StoreError):
+            store.save_asset(pid, "raw.mov", b"\0" * 10)  # clips go through the conversion
+        (store.assets_dir(pid) / "street.mp4").write_bytes(b"\0" * 100)
+        bl.write_meta(store, pid, "street.mp4", {"kind": "video", "state": "ready", "source": "pexels", "seconds": 4.2, "width": 1920, "height": 1080, "fps": 25.0})
+        bl.write_meta(store, pid, "desk.mp4", {"kind": "video", "state": "converting", "source": "upload"})
+        items = {a["name"]: a for a in store.list_assets(pid)}
+        self.assertEqual((items["street.mp4"]["kind"], items["street.mp4"]["seconds"], items["street.mp4"]["width"]), ("video", 4.2, 1920))
+        self.assertEqual(items["desk.mp4"]["state"], "converting")
+        self.assertEqual(bl.free_name(store, pid, "desk.mov", ".mp4"), "desk-2.mp4")  # a clip on its way keeps its name
+        summary = store.state_summary(pid)
+        self.assertIn("b-roll clips: street.mp4 (4.2 s, 1920x1080, stock), desk.mp4 (still converting)", summary)
+        store.delete_asset(pid, "street.mp4")
+        self.assertIsNone(store.asset_meta(pid, "street.mp4"))
+
+    def stock(self, routes: dict):
+        """Stands in for the network: each URL part maps to a JSON answer or to bytes."""
+        import io
+
+        from motion import broll as bl
+
+        class Res(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else req
+            for part, answer in routes.items():
+                if part in url:
+                    if isinstance(answer, Exception):
+                        raise answer
+                    return Res(answer if isinstance(answer, bytes) else json.dumps(answer).encode())
+            raise AssertionError("unexpected request " + url)
+
+        return mock.patch.multiple(bl, _urlopen=fake, _check_url=lambda u: u)
+
+    PEXELS_VIDEOS = {"videos": [
+        {"id": 111, "width": 3840, "height": 2160, "duration": 12, "url": "https://www.pexels.com/video/people-queue-at-a-counter-111/", "image": "https://images.pexels.com/111.jpg",
+         "user": {"name": "Asha", "url": "https://www.pexels.com/@asha"},
+         "video_files": [{"link": "https://v.pexels.com/111-uhd.mp4", "width": 3840, "height": 2160, "fps": 25, "file_type": "video/mp4"},
+                         {"link": "https://v.pexels.com/111-8k.mp4", "width": 7680, "height": 4320, "fps": 25, "file_type": "video/mp4"},
+                         {"link": "https://v.pexels.com/111-hd.mp4", "width": 1920, "height": 1080, "fps": 25, "file_type": "video/mp4"}]},
+        {"id": 112, "width": 1080, "height": 1920, "duration": 9, "url": "https://www.pexels.com/video/tall-112/", "image": "", "user": {}, "video_files": [{"link": "https://v.pexels.com/112.mp4", "width": 1080, "height": 1920}]},
+    ]}
+    PIXABAY_VIDEOS = {"hits": [{"id": 222, "pageURL": "https://pixabay.com/videos/server-room-222/", "tags": "server, data centre", "duration": 3, "user": "ravi", "user_id": 9,
+                                "videos": {"large": {"url": "https://cdn.pixabay.com/222-l.mp4", "width": 1920, "height": 1080, "thumbnail": "https://cdn.pixabay.com/222.jpg"},
+                                           "small": {"url": "https://cdn.pixabay.com/222-s.mp4", "width": 960, "height": 540}}}]}
+
+    def test_stock_search_from_both_services(self):
+        from motion import broll as bl
+
+        with mock.patch.dict(os.environ, {"MOTION_PEXELS_KEY": "", "MOTION_PIXABAY_KEY": ""}):
+            with self.assertRaises(bl.BrollError) as none:
+                bl.search("queue at a counter")
+            self.assertIn("MOTION_PEXELS_KEY", str(none.exception))
+            self.assertIn("https://www.pexels.com/api/", str(none.exception))
+        with mock.patch.dict(os.environ, {"MOTION_PEXELS_KEY": "pk", "MOTION_PIXABAY_KEY": "xk"}), self.stock({"api.pexels.com/videos/search": self.PEXELS_VIDEOS, "pixabay.com/api/videos/": self.PIXABAY_VIDEOS}):
+            found = bl.search("queue at a counter", "video", "landscape", min_seconds=2)
+        self.assertEqual([c["id"] for c in found], ["pexels:111", "pixabay:222"])  # the tall clip left out, the services alternate
+        first = found[0]
+        self.assertEqual((first["title"], first["author"], first["seconds"]), ("people queue at a counter", "Asha", 12.0))
+        self.assertIn("Pexels License", first["licence"])
+        self.assertEqual(bl.best_file(first)["url"], "https://v.pexels.com/111-uhd.mp4")  # the largest at most 4K
+        self.assertEqual(bl.best_file(found[1])["url"], "https://cdn.pixabay.com/222-l.mp4")
+        self.assertIn("imports at 3840 x 2160", bl.describe(first))
+        import urllib.error
+
+        with mock.patch.dict(os.environ, {"MOTION_PEXELS_KEY": "bad", "MOTION_PIXABAY_KEY": ""}), self.stock({"api.pexels.com": urllib.error.HTTPError("u", 401, "no", {}, None)}):
+            with self.assertRaises(bl.BrollError) as refused:
+                bl.search("queue")
+        self.assertIn("refused the key", str(refused.exception))
+
+    def test_import_converts_trims_and_keeps_the_credit(self):
+        from motion import broll as bl
+
+        store = new_store()
+        pid = store.create_project("Stock", "16:9", "algoinsight-paper")["id"]
+        raw = self.clip("stock.mp4", seconds=3.0, rate=30).read_bytes()
+        with mock.patch.dict(os.environ, {"MOTION_PEXELS_KEY": "pk", "MOTION_PIXABAY_KEY": ""}), self.stock({"api.pexels.com/videos/search": self.PEXELS_VIDEOS, "111-uhd.mp4": raw}):
+            bl.search("queue", "video")
+            item = bl.import_stock(store, pid, self.ff, "pexels:111", start=0.5, seconds=1.5)
+        self.assertEqual(item["kind"], "video")
+        self.assertTrue(item["name"].startswith("broll-people-queue-at-a-counter-111"), item["name"])
+        self.assertAlmostEqual(item["seconds"], 1.5, delta=0.1)
+        meta = store.asset_meta(pid, item["name"])
+        self.assertEqual((meta["source"], meta["author"], meta["stockId"]), ("pexels", "Asha", "pexels:111"))
+        credits = store.read_doc(pid, "CREDITS.md")
+        self.assertIn(f'- asset://{item["name"]}: "people queue at a counter" by Asha (https://www.pexels.com/@asha) on Pexels', credits)
+        self.assertFalse(any((store.assets_dir(pid) / ".incoming").iterdir()))  # the download is gone
+
+    def test_an_upload_converts_in_the_background(self):
+        from fastapi.testclient import TestClient
+
+        import app
+
+        src = self.clip("mine.mov", seconds=1.5, rate=30)
+        c = TestClient(app.app)
+        pid = c.post("/api/motion/projects", json={"title": "Upload clip", "brandKitId": "algoinsight-paper"}).json()["project"]["id"]
+        with open(src, "rb") as fh:
+            got = c.post(f"/api/motion/projects/{pid}/assets", files={"files": ("mine.mov", fh, "video/quicktime")}).json()
+        self.assertEqual((got[0]["name"], got[0]["kind"], got[0]["state"]), ("mine.mp4", "video", "converting"))
+        for _ in range(240):
+            item = next((a for a in c.get(f"/api/motion/projects/{pid}/assets").json() if a["name"] == "mine.mp4"), {})
+            if item.get("state") == "ready":
+                break
+            time.sleep(0.25)
+        self.assertEqual((item.get("state"), item.get("width"), item.get("fps")), ("ready", 1280, 30.0))
+        notes = [e["text"] for e in c.get(f"/api/motion/projects/{pid}/chat").json()["log"] if e.get("kind") == "note"]
+        self.assertTrue(any("Clip ready: asset://mine.mp4" in n for n in notes), notes)
+        # the player seeks clips with range requests
+        r = c.get(f"/api/motion/projects/{pid}/assets/mine.mp4", headers={"Range": "bytes=0-99"})
+        self.assertEqual((r.status_code, len(r.content)), (206, 100))
+        c.delete(f"/api/motion/projects/{pid}")
+
+    def test_the_prompt_and_tools(self):
+        from motion import render as rd
+        from motion.prompts import SYSTEM_PROMPT, TOOLS
+
+        section = SYSTEM_PROMPT[SYSTEM_PROMPT.index("## B-roll"):SYSTEM_PROMPT.index("## The user's Excalidraw drawings")]
+        for phrase in ("the user's own clips first", "never presented as a real demo, a measurement", "Never show identifiable people as our users", "no brand logo", "Keep the credits", "Never call play()", "fx.kenburns"):
+            self.assertIn(phrase, section)
+        self.assertIn("b-roll is placed, never made", SYSTEM_PROMPT)
+        names = {t["name"] for t in TOOLS}
+        self.assertTrue({"find_broll", "import_broll"} <= names)
+        self.assertIn("p.settle", rd.SEEK_SETTLE)
+
+
+class KitIconsAndCastTests(unittest.TestCase):
+    """The explainer kit's icons, logos and cast as the backend sees them (the files the build scripts wrote)."""
+
+    def test_the_kit_files_are_there(self):
+        from motion import kitdata
+
+        self.assertGreater(len(kitdata.icon_tags()), 1500)
+        self.assertIn("aws/s3", kitdata.logo_index())
+        self.assertEqual(kitdata.logo_index()["azure/acr"], "Container Registries")
+        self.assertEqual(set(kitdata.cast_people()), {"meera", "kavya", "kabir", "ishaan", "arjun", "priya"})
+        m = kitdata.cast_manifest()
+        self.assertIn("talk", m["faces"])
+        self.assertEqual(m["aliases"]["faces"]["Explaining"], "talk")  # scenes written for the old cast still work
+
+    def test_find_icons_answers_plain_words(self):
+        from motion import kitdata
+
+        db = kitdata.find_icons("database")
+        self.assertEqual(db["icons"][0][0], "database")
+        self.assertTrue({"aws/rds", "brands/postgres"} <= {n for n, _ in db["logos"]})
+        self.assertIn("aws/sqs", [n for n, _ in kitdata.find_icons("message queue")["logos"]][:3])
+        self.assertIn("split", [n for n, _ in kitdata.find_icons("load balancer")["icons"]][:3])
+        self.assertIn("bot", [n for n, _ in kitdata.find_icons("llm")["icons"]])
+        starter = kitdata.find_icons("")
+        self.assertIn("server", [n for n, _ in starter["icons"]])
+        self.assertEqual(len(starter["logos"]), len(kitdata.logo_index()))
+
+    def test_unknown_icons_logos_and_people_are_reported(self):
+        warnings = check_scene(
+            '<div data-id="a" data-icon="databse">x</div><img data-id="b" data-logo="aws/s4">'
+            '<div class="p-person" data-id="m" data-person="meera" data-pose="fly" data-face="Calm"></div>'
+            '<div data-id="z" data-person="zoe"></div><script>tl.set($("a"), {x: 0}, 0)</script>',
+            {},
+        )
+        joined = " | ".join(warnings)
+        for part in ('No icon named "databse"', 'No logo "aws/s4"', 'Meera has no pose "fly"', 'No person "zoe" in the cast'):
+            self.assertIn(part, joined)
+        ok = check_scene('<div data-id="a" data-icon="database">x</div><div data-id="m" data-person="kabir" data-pose="arms" data-face="Driven"></div><script>tl.set($("a"), {x: 0}, 0)</script>', {})
+        self.assertFalse(any("icon" in w or "person" in w or "pose" in w or "face" in w for w in ok), ok)
+
+    def test_the_prompt_names_the_cast_and_the_kit(self):
+        from motion.prompts import SYSTEM_PROMPT, TOOLS
+
+        self.assertNotIn("{CAST_LIST}", SYSTEM_PROMPT)
+        self.assertNotIn("(KIT:icons)", SYSTEM_PROMPT)
+        self.assertNotIn("(KIT:cast)", SYSTEM_PROMPT)
+        self.assertIn("- meera: Meera, a backend engineer", SYSTEM_PROMPT)
+        self.assertIn("never a letter in a circle", SYSTEM_PROMPT)
+        self.assertIn('data-icon="name"', SYSTEM_PROMPT)
+        self.assertIn("find_icons", [t["name"] for t in TOOLS])
+
+
+class SketchDrawingTests(unittest.TestCase):
+    """The Excalidraw sketch look and the user's own Excalidraw drawings (kit/sketch.ts, kit/excalidraw.ts)."""
+
+    DOC = {
+        "type": "excalidraw",
+        "version": 2,
+        "elements": [
+            {"id": "lb", "type": "rectangle", "x": 100, "y": 40, "width": 200, "height": 80, "groupIds": ["g1"], "seed": 11},
+            {"id": "lb-text", "type": "text", "x": 120, "y": 65, "width": 160, "height": 25, "text": "Load\nbalancer", "originalText": "Load balancer", "containerId": "lb"},
+            {"id": "db", "type": "ellipse", "x": 420, "y": 40, "width": 160, "height": 90, "groupIds": ["g1"]},
+            {"id": "a1", "type": "arrow", "x": 300, "y": 80, "width": 120, "height": 4, "points": [[0, 0], [120, 4]], "endArrowhead": "arrow"},
+            {"id": "note", "type": "text", "x": 100, "y": 200, "width": 120, "height": 25, "text": "80 ms here", "frameId": "f1"},
+            {"id": "f1", "type": "frame", "x": 80, "y": 180, "width": 300, "height": 80, "name": "Latency"},
+            {"id": "gone", "type": "rectangle", "x": 900, "y": 900, "width": 50, "height": 50, "isDeleted": True},
+        ],
+        "files": {},
+    }
+
+    def test_excalidraw_files_are_drawings_and_checked(self):
+        store = new_store()
+        pid = store.create_project("Drawings", "16:9", "algoinsight-paper")["id"]
+        item = store.save_asset(pid, "arch.excalidraw", json.dumps(self.DOC).encode())
+        self.assertEqual((item["name"], item["kind"]), ("arch.excalidraw", "drawing"))
+        with self.assertRaises(StoreError):
+            store.save_asset(pid, "broken.excalidraw", b"{not json")
+        with self.assertRaises(StoreError):
+            store.save_asset(pid, "empty.excalidraw", b'{"type": "excalidraw"}')
+        self.assertEqual(store_mod.asset_kind("x.EXCALIDRAW"), "drawing")
+
+    def test_read_drawing_lists_parts_with_their_labels(self):
+        store = new_store()
+        pid = store.create_project("Drawings", "16:9", "algoinsight-paper")["id"]
+        store.save_asset(pid, "arch.excalidraw", json.dumps(self.DOC).encode())
+        info = store.read_drawing(pid, "arch")  # the extension is optional
+        ids = [e["id"] for e in info["elements"]]
+        self.assertNotIn("gone", ids)  # a deleted element isn't part of the drawing
+        lb = next(e for e in info["elements"] if e["id"] == "lb")
+        self.assertEqual((lb["text"], lb["groups"], lb["box"]), ("Load balancer", ["g1"], [100.0, 40.0, 200.0, 80.0]))
+        label = next(e for e in info["elements"] if e["id"] == "lb-text")
+        self.assertEqual(label["container"], "lb")
+        arrow = next(e for e in info["elements"] if e["id"] == "a1")
+        self.assertEqual(arrow["box"], [300.0, 80.0, 120.0, 4.0])
+        frame = next(e for e in info["elements"] if e["id"] == "f1")
+        self.assertEqual(frame["name"], "Latency")
+        self.assertEqual(info["bounds"], [80.0, 40.0, 500.0, 220.0])
+        self.assertEqual(info["texts"], ["Load balancer", "80 ms here"])
+        self.assertIn("drawing arch.excalidraw: 6 elements, texts: Load balancer; 80 ms here", store.state_summary(pid))
+        with self.assertRaises(StoreError) as missing:
+            store.read_drawing(pid, "other.excalidraw")
+        self.assertIn("Drawings: arch.excalidraw", str(missing.exception))
+        # the tool Claude calls
+        agent = ag.Agent(store, renderer=None, hub=Hub(store), exports=None)
+        text, label = agent._tool(pid, "read_drawing", {"name": "arch.excalidraw"})
+        self.assertIn('- lb rectangle at 100,40 size 200x80 "Load balancer"; groups g1', text)
+        self.assertIn("- lb-text text at 120,65 size 160x25", text)
+        self.assertIn("label of lb", text)
+        self.assertIn('named "Latency"', text)
+        self.assertIn("fx.drawPart", text)
+        self.assertEqual(label, "Read the drawing arch.excalidraw (6 elements)")
+
+    def test_the_prompt_teaches_the_sketch_look_and_drawings(self):
+        from motion.prompts import SYSTEM_PROMPT, TOOL_LABELS, TOOLS
+
+        sketch = SYSTEM_PROMPT[SYSTEM_PROMPT.index("## Sketch diagrams"):SYSTEM_PROMPT.index("## Coding visuals")]
+        for phrase in ("s-box, s-circle, s-ellipse or s-diamond", "data-fill", "fx.sketchIn", "fx.sketchLink", "fx.sketchCircle", "var(--font-sketch)"):
+            self.assertIn(phrase, sketch)
+        drawings = SYSTEM_PROMPT[SYSTEM_PROMPT.index("## The user's Excalidraw drawings"):SYSTEM_PROMPT.index("# The thumbnail")]
+        for phrase in ('class="x-draw"', "read_drawing", "fx.drawIn", "fx.drawPart", "fx.drawingPart", "Never redraw the user's drawing"):
+            self.assertIn(phrase, drawings)
+        self.assertNotIn("(KIT:sketch)", SYSTEM_PROMPT)
+        self.assertNotIn("(KIT:excalidraw)", SYSTEM_PROMPT)
+        self.assertIn("read_drawing", [t["name"] for t in TOOLS])
+        self.assertEqual(TOOL_LABELS["read_drawing"], "Reading the drawing")
+
+
+class CodingVisualsPromptTests(unittest.TestCase):
+    """The explainer kit's coding visuals, sequence diagrams, terminal and diff, as the prompt teaches them."""
+
+    def test_the_prompt_teaches_the_coding_visuals(self):
+        from motion.prompts import SYSTEM_PROMPT
+
+        kit = SYSTEM_PROMPT[SYSTEM_PROMPT.index("## Coding visuals"):SYSTEM_PROMPT.index("## People (the cast)")]
+        for phrase in (
+            "fx.array(el, values, opts)",
+            "pointer(name, i, at, tone)",
+            "swap(i, j, at)",
+            "window(i, j, at)",
+            "fx.list(el, values, opts)",
+            "reverse(i, at)",
+            "fx.stack(el, values, opts)",
+            "fx.queue(el, values, opts)",
+            "fx.hashmap(el, buckets, opts)",
+            "fx.tree(el, data, opts)",
+            "[8, 3, 10, 1, 6, null, 14]",
+            "fx.graph(el, {nodes",
+            "frontier([ids], at)",
+            "fx.grid(el, {rows, cols, values, rowLabels, colLabels}, opts)",
+            "fx.callstack(el, opts)",
+            "fx.sequence(el, {actors, messages, notes}, opts)",
+            "kind is call (solid), reply (dashed), async (open head) or self (a loop)",
+            "never made up",
+        ):
+            self.assertIn(phrase, kit)
+        self.assertNotIn("(KIT:ds)", SYSTEM_PROMPT)
+        self.assertNotIn("(KIT:sequence)", SYSTEM_PROMPT)
+
+    def test_the_code_panel_teaches_the_terminal_and_the_diff(self):
+        from motion.prompts import SYSTEM_PROMPT
+
+        code = next(line for line in SYSTEM_PROMPT.splitlines() if line.startswith("- p-code:"))
+        for phrase in ('data-lang="diff"', "data-diff", '<pre class="p-term"', "fx.term(el, at)", "verbatim from the run"):
+            self.assertIn(phrase, code)
 
 
 class WindowsFileTests(unittest.TestCase):
@@ -394,6 +1095,35 @@ class HashTests(unittest.TestCase):
             page.write_text('<script src="/assets/player-BBBB.js"></script>', encoding="utf-8")  # the player changed
             new = rd.scene_hashes(b, None, 1920, 1080, rd.player_fingerprint(Path(d)))
         self.assertTrue(all(x != y for x, y in zip(old, new)))
+
+    def test_the_encoder_is_part_of_each_scene_key(self):
+        """Scene files from two encoders can't be joined into one MP4: switching redoes every scene."""
+        store = new_store()
+        pid = store.create_project("E", "16:9")["id"]
+        storyboard(store, pid)
+        b = store.bundle(pid)
+        qsv = rd.scene_hashes(b, None, 3840, 2160, "", f"qsv-{rd.ENCODE_VERSION}")
+        x264 = rd.scene_hashes(b, None, 3840, 2160, "", f"x264-{rd.ENCODE_VERSION}")
+        self.assertTrue(all(a != c for a, c in zip(qsv, x264)))
+        self.assertEqual(rd.scene_hashes(b, None, 3840, 2160, "", ""), rd.scene_hashes(b, None, 3840, 2160))
+
+    def test_the_encoder_choice(self):
+        with mock.patch.dict(os.environ, {"MOTION_ENCODER": "x264"}):
+            self.assertEqual(rd.video_encoder("anything"), "x264")
+        with mock.patch.dict(os.environ, {"MOTION_ENCODER": "qsv"}):
+            self.assertEqual(rd.video_encoder("anything"), "qsv")
+        with mock.patch.dict(os.environ, {"MOTION_ENCODER": ""}):
+            # an FFmpeg that can't open Quick Sync (here: none at all) falls back to x264 on the CPU
+            self.assertEqual(rd.video_encoder(str(Path(tempfile.mkdtemp(dir=TMP)) / "no-ffmpeg.exe")), "x264")
+
+    def test_exports_are_4k_by_default(self):
+        import inspect
+
+        from motion.jobs import Exports
+
+        self.assertEqual(rd.DEFAULT_RESOLUTION, 2160)
+        self.assertEqual(inspect.signature(Exports.start).parameters["resolution"].default, 2160)
+        self.assertEqual(rd.output_size(1600, 900, rd.DEFAULT_RESOLUTION)[:2], (3840, 2160))
 
     def test_output_size(self):
         self.assertEqual(rd.output_size(1080, 1920, 720)[:2], (720, 1280))
@@ -747,7 +1477,7 @@ class ApiTests(unittest.TestCase):
         import app
 
         c = TestClient(app.app)
-        self.assertEqual(c.get("/api/busy").json(), {"busy": False, "transcriptions": 0, "exports": 0, "voice": 0, "claude": 0})
+        self.assertEqual(c.get("/api/busy").json(), {"busy": False, "transcriptions": 0, "exports": 0, "voice": 0, "claude": 0, "clips": 0})
         with app._lock:
             app._jobs["busytest0001"] = {"id": "busytest0001", "state": "done", "frames": {"state": "running"}}  # screenshots still going
         try:
@@ -1099,7 +1829,7 @@ class ThumbnailTests(unittest.TestCase):
         self.assertEqual((s["id"], s["kind"], s["duration"], s["transition"], s["lead"], s["cues"], s["status"]), ("thumbnail", "thumbnail", 3.0, "cut", 0.3, [0.3], "written"))
         self.assertEqual(set(self.store.bundle(self.pid)["scenes"][0]) - set(s), set())  # every field a bundle scene has
         _, warnings = self.store.write_thumbnail(self.pid, THUMB, {"headline": "How the queue really decides who waits"})
-        self.assertTrue(any("3 to 5" in w for w in warnings), warnings)
+        self.assertTrue(any("1 to 4 very large words" in w for w in warnings), warnings)
         with self.assertRaises(StoreError) as stale:
             self.store.write_thumbnail(self.pid, THUMB, {"headline": "x"}, base_rev=1)
         self.assertEqual(stale.exception.status, 409)
@@ -1415,7 +2145,7 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(set(spec["input_schema"]["properties"]), {"from", "to", "limit"})
         self.assertEqual(spec["input_schema"]["properties"]["limit"]["maximum"], 12)
         self.assertIn("view_references", TOOL_LABELS)
-        self.assertIn("view_references with the source times", SYSTEM_PROMPT)
+        self.assertIn("you may look at them (view_references) to see how that video showed an idea", SYSTEM_PROMPT)
         self.assertIn("Never copy their layout, words, brand, logos, characters, numbers or images", SYSTEM_PROMPT)
         self.assertIn("never show them in the video", SYSTEM_PROMPT)
 
@@ -1430,6 +2160,31 @@ class PublishingPromptTests(unittest.TestCase):
             self.assertIn(phrase, SYSTEM_PROMPT)
         self.assertNotIn("\u2014", SYSTEM_PROMPT)  # hyphens, never em dashes
         self.assertGreaterEqual(int(rd.RUNTIME_VERSION), 6)  # the player that has these tools (cached scenes redone)
+
+    def test_the_prompt_starts_from_the_user_not_a_reference(self):
+        """References are research; the outline, the stories and the numbers are the user's; each video's shape
+        and length fit its topic."""
+        from motion.prompts import SYSTEM_PROMPT, TOOLS
+
+        for phrase in (
+            "A reference (another creator's video, attached as a timed transcript, or screenshots of it) is research only",
+            "Never follow its outline, its order, its examples, its story or its length",
+            "Ask first. Before any outline",
+            "don't repeat the latest ones unless this topic needs it",
+            "Never pad to reach a length",
+            "[[you: what goes here, in a few words]]",
+            "write_scene is refused until then",
+            "never change it unless they ask, and then send it with replaceOwnWords: true",
+        ):
+            self.assertIn(phrase, SYSTEM_PROMPT)
+        for gone in ("Teach every point it teaches", "covers", "sourceSkips", "10 to 30 minutes"):
+            self.assertNotIn(gone, SYSTEM_PROMPT)
+        by_name = {t["name"]: t["input_schema"]["properties"] for t in TOOLS}
+        self.assertEqual(by_name["write_storyboard"]["plan"]["properties"]["shape"]["enum"], list(store_mod.SHAPES))
+        self.assertNotIn("covers", by_name["write_storyboard"]["scenes"]["items"]["properties"])
+        for tool in ("write_storyboard", "write_script", "write_scene"):
+            self.assertIn("replaceOwnWords", by_name[tool])
+            self.assertNotIn("sourceSkips", by_name[tool])
 
 
 if __name__ == "__main__":
