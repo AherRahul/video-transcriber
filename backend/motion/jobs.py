@@ -1,8 +1,10 @@
 """
-MP4 exports: one at a time for the whole app (frame capture and x264 use every core), with progress the
-page shows in the editor's top bar. The video is exported as it was when Export was pressed, so edits
-made during an export go into the next one. Each MP4 gets its captions next to it (<same name>.srt and
-.vtt), made from the same moment's narration and voice.
+MP4 exports, several videos at once (EXPORT_SLOTS), with progress the page shows in the editor's top bar
+and on the library's cards. Each running export has a lane of its own: a separate renderer (its own
+thread, event loop, Playwright driver and headless browser), so two exports never queue behind each other
+on one browser. More exports than slots wait their turn in order. The video is exported as it was when
+Export was pressed, so edits made during an export go into the next one. Each MP4 gets its captions next
+to it (<same name>.srt and .vtt), made from the same moment's narration and voice.
 
 Also here: the narration track and the rendered thumbnail, both built once per content and kept in
 renders/.
@@ -11,6 +13,7 @@ renders/.
 from __future__ import annotations
 
 import os
+import queue
 import threading
 import time
 import uuid
@@ -188,13 +191,37 @@ class VoiceJobs:
             self._update(pid, state="error", message=f"Voice failed: {type(err).__name__}: {err}"[:500])
 
 
+def _env_int(name: str, default: int, low: int, high: int) -> int:
+    try:
+        return max(low, min(high, int(os.environ.get(name) or default)))
+    except ValueError:
+        return default
+
+
+# Videos exported at the same time. One export alone leaves part of the computer idle (each captured frame
+# is a round trip through the browser and the driver, and the audio mix and the join at the end use one
+# core), so two side by side finish a queue sooner. Measured 2026-11-19 on the i5-13420H with a 112 s paper
+# video at 4K: alone 287 s; two at once both done in 465 s, against 574 s one after the other.
+EXPORT_SLOTS = _env_int("MOTION_EXPORTS", 2, 1, 4)
+# The capture pages of all running exports together: an export alone uses rd.DEFAULT_PAGES; with others
+# running, each gets its share of this, so several exports never open more pages than the computer copes
+# with (each 4K page is a renderer process with its own memory).
+PAGE_BUDGET = _env_int("MOTION_PAGE_BUDGET", 4, 1, 12)
+
+
 class Exports:
-    def __init__(self, store: Store, renderer: rd.RenderService, hub: Hub, find_ffmpeg):
+    def __init__(self, store: Store, renderer: rd.RenderService, hub: Hub, find_ffmpeg, slots: int | None = None):
         self.store = store
         self.render = renderer
         self.hub = hub
         self.find_ffmpeg = find_ffmpeg
-        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="motion-export")
+        self.slots = slots or EXPORT_SLOTS
+        self._pool = ThreadPoolExecutor(max_workers=self.slots, thread_name_prefix="motion-export")
+        # the lanes: one renderer per slot, made on first use (None until then) and handed to one export at a time
+        self._lanes: queue.SimpleQueue = queue.SimpleQueue()
+        self._made: list = []
+        for _ in range(self.slots):
+            self._lanes.put(None)
         self._jobs: dict[str, dict] = {}
         self._cancel: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
@@ -203,6 +230,43 @@ class Exports:
         with self._lock:
             job = self._jobs.get(pid)
             return dict(job) if job else None
+
+    def live(self) -> dict[str, dict]:
+        """The exports waiting or running now, by video: {pid: {state, percent, message}} (the library's cards)."""
+        with self._lock:
+            return {
+                pid: {"state": j["state"], "percent": j.get("percent"), "message": j.get("message")}
+                for pid, j in self._jobs.items()
+                if j.get("state") in ("queued", "running")
+            }
+
+    def _running(self) -> int:
+        with self._lock:
+            return sum(1 for j in self._jobs.values() if j.get("state") == "running")
+
+    def _take_lane(self):
+        lane = self._lanes.get()
+        if lane is None:
+            # a real renderer makes a lane of its own; a stand-in (the tests) serves every lane itself
+            lane = self.render.clone() if hasattr(self.render, "clone") else self.render
+            with self._lock:
+                self._made.append(lane)
+        return lane
+
+    def _give_back(self, lane) -> None:
+        if lane is not self.render and hasattr(lane, "release"):
+            try:
+                lane.call(lane.release, timeout=30)
+            except Exception:  # noqa: BLE001 - a lane that can't close its browser is still usable: it opens a new one
+                pass
+        self._lanes.put(lane)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            lanes = list(self._made)
+        for lane in lanes:
+            if lane is not self.render and hasattr(lane, "shutdown"):
+                lane.shutdown()
 
     def renders(self, pid: str) -> list[dict]:
         out = []
@@ -252,7 +316,7 @@ class Exports:
             "id": uuid.uuid4().hex[:8],
             "state": "queued",
             "percent": 0.0,
-            "message": "Waiting for the previous export to finish",
+            "message": f"Waiting for a free export slot ({self.slots} videos export at once)",
             "resolution": resolution,
             "narration": narration,
             "sfx": sfx,
@@ -282,7 +346,23 @@ class Exports:
         if cancel.is_set():
             self._update(pid, state="cancelled", message="Cancelled")
             return
+        lane = self._take_lane()
+        try:
+            self._export(lane, pid, bundle, audio, ffmpeg, resolution, cancel, with_narration, with_sfx, with_loudness, captions)
+        finally:
+            self._give_back(lane)
+
+    def _export(
+        self, lane, pid, bundle, audio, ffmpeg, resolution, cancel, with_narration: bool, with_sfx: bool, with_loudness: bool,
+        captions: dict | None,
+    ) -> None:
+        if cancel.is_set():  # cancelled while it waited for the lane
+            self._update(pid, state="cancelled", message="Cancelled")
+            return
         self._update(pid, state="running", message="Starting the browser")
+        # alone, an export uses every page it wants; with others running, its share of the page budget
+        running = self._running()
+        pages = rd.DEFAULT_PAGES if running <= 1 else max(1, PAGE_BUDGET // running)
         try:
             folder = self.store.renders_dir(pid)
             ow, oh, _ = rd.output_size(bundle["width"], bundle["height"], resolution)
@@ -295,8 +375,8 @@ class Exports:
             def progress(fraction: float, message: str) -> None:
                 self._update(pid, percent=round(fraction * 100, 1), message=message)
 
-            result = self.render.call(
-                self.render.export,
+            result = lane.call(
+                lane.export,
                 bundle,
                 self.store.assets_dir(pid),
                 folder / "cache",
@@ -310,6 +390,7 @@ class Exports:
                 with_sfx,
                 with_loudness,
                 timeout=6 * 3600,
+                pages=pages,
             )
             rd.prune_cache(folder / "cache")
             # the captions under the MP4's own name, so the two travel together (YouTube takes either file)

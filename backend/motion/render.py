@@ -243,11 +243,39 @@ class RenderService:
                 self._loop = loop
             return self._loop
 
-    def call(self, coro_fn, *args, timeout: float = 900):
-        """Runs `await coro_fn(*args)` on the render thread and waits for the result."""
+    def call(self, coro_fn, *args, timeout: float = 900, **kwargs):
+        """Runs `await coro_fn(*args, **kwargs)` on the render thread and waits for the result."""
         loop = self._ensure_loop()
-        future = asyncio.run_coroutine_threadsafe(coro_fn(*args), loop)
+        future = asyncio.run_coroutine_threadsafe(coro_fn(*args, **kwargs), loop)
         return future.result(timeout)
+
+    def clone(self) -> "RenderService":
+        """Another renderer for the same pages, with its own thread, event loop, Playwright driver and browser:
+        an export lane. Two exports on one renderer would share one Python thread and one driver, which carry
+        every captured frame (a 4K JPEG, base64 in JSON), so each running export gets its own."""
+        return RenderService(self.base_url, self.dist_dir)
+
+    async def release(self) -> None:
+        """Closes the browser and its driver (an export lane between exports: an idle Edge holds memory). The
+        next job opens them again."""
+        for h in list(self._preview_pages.values()):
+            try:
+                await h["ctx"].close()
+            except Exception:  # noqa: BLE001 - closing anyway
+                pass
+        self._preview_pages.clear()
+        try:
+            if self._browser is not None:
+                await self._browser.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if self._pw is not None:
+                await self._pw.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        self._browser = None
+        self._pw = None
 
     def player_built(self) -> bool:
         return (self.dist_dir / "motion-player.html").exists()
@@ -521,8 +549,10 @@ class RenderService:
         narration_path: Path | None = None,
         with_sfx: bool = True,
         loudness: bool = True,
+        pages: int | None = None,
     ) -> dict:
-        """The MP4. loudness False skips the loudness normalisation (the music is still ducked)."""
+        """The MP4. loudness False skips the loudness normalisation (the music is still ducked). pages: the
+        browser pages that capture scenes side by side (DEFAULT_PAGES when not given)."""
         started = time.time()
         scenes = bundle["scenes"]
         if not scenes:
@@ -630,7 +660,7 @@ class RenderService:
         sfx: list[dict] = []
         grain: Path | None = None
         try:
-            pages = min(DEFAULT_PAGES, len(todo)) if todo else 1
+            pages = min(max(1, pages or DEFAULT_PAGES), len(todo)) if todo else 1
             handles = [await self._open(bundle, zoom=scale) for _ in range(pages)]
             if bundle.get("theme") == "paper":
                 grain = cache_dir / f"grain-{ow}x{oh}.png"

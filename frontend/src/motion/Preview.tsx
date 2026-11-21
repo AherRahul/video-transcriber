@@ -9,10 +9,15 @@
 //
 // Keys (when not typing): Space play/pause, Left/Right a frame (Shift: a second), Up/Down the scene
 // before/after, Home/End the start/end, Escape leaves comment mode.
+//
+// Speed (0.5x to 2x) runs the whole preview faster or slower: the clock, the narration and the music follow
+// it. Free voice reads aloud, with the browser's own text-to-speech (freeVoice.ts), each scene that has no
+// voice yet, from the moment its narration would start, so a script can be heard before ElevenLabs is used.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 
 import { clockTenths, lengthLabel } from "./api";
+import { fromFraction, loadSpeed, loadVoiceName, pickVoice, saveSpeed, saveVoiceName, Speaker, speakable, SPEEDS, supported, useVoices, voiceLabel } from "./freeVoice";
 import type { Bundle, BundleScene, CommentTarget, FromPlayer, ToPlayer } from "./types";
 
 type Props = {
@@ -77,6 +82,20 @@ export default function Preview({ bundle, selectedScene, onSelectScene, onCommen
   const [size, setSize] = useState({ w: 0, h: 0 });
   const mutedRef = useRef(false);
   mutedRef.current = muted;
+  // the playback speed (remembered in this browser) and the free voice
+  const [speed, setSpeed] = useState(loadSpeed);
+  const speedRef = useRef(speed);
+  const [freeVoice, setFreeVoice] = useState(false);
+  const freeVoiceRef = useRef(false);
+  freeVoiceRef.current = freeVoice;
+  const voices = useVoices();
+  const [voiceName, setVoiceName] = useState(loadVoiceName);
+  const voice = pickVoice(voices, voiceName);
+  const voiceRef = useRef(voice);
+  voiceRef.current = voice;
+  const speakerRef = useRef<Speaker | null>(null);
+  if (!speakerRef.current) speakerRef.current = new Speaker();
+  const spokenRef = useRef<string | null>(null); // the scene the free voice is reading (once per pass through it)
   const duration = bundle.duration;
   bundleRef.current = bundle;
   const selectRef = useRef(onSelectScene);
@@ -110,15 +129,21 @@ export default function Preview({ bundle, selectedScene, onSelectScene, onCommen
     [post],
   );
 
+  const stopFreeVoice = useCallback(() => {
+    speakerRef.current?.stop();
+    spokenRef.current = null; // played again, the scene under the playhead is read from where it is
+  }, []);
+
   const pause = useCallback(() => {
     playingRef.current = false;
     setPlaying(false);
     cancelAnimationFrame(rafRef.current);
     audioRef.current?.pause();
     musicRef.current?.pause();
+    stopFreeVoice();
     // the playhead around the picture was redrawn only now and then while playing: show the exact frame
     setT(tRef.current);
-  }, []);
+  }, [stopFreeVoice]);
 
   const play = useCallback(() => {
     const d = bundleRef.current.duration;
@@ -127,16 +152,20 @@ export default function Preview({ bundle, selectedScene, onSelectScene, onCommen
     playingRef.current = true;
     setPlaying(true);
     setPick(null);
-    startRef.current = performance.now() - tRef.current * 1000;
+    spokenRef.current = null;
+    // video time = (wall time since startRef) x speed
+    startRef.current = performance.now() - (tRef.current / speedRef.current) * 1000;
     const a = audioRef.current;
     if (a) {
       a.currentTime = tRef.current;
+      a.playbackRate = speedRef.current;
       a.play().catch(() => null);
     }
     const m = musicRef.current;
     if (m) {
       m.currentTime = tRef.current;
       m.volume = 0.15;
+      m.playbackRate = speedRef.current;
       m.play().catch(() => null);
     }
     let last = tRef.current;
@@ -147,14 +176,34 @@ export default function Preview({ bundle, selectedScene, onSelectScene, onCommen
       // made the animations stall for a moment and skip. Now the narration only pulls the smooth clock
       // gently toward itself, and is followed at once only after a real jump (a seek or a stall).
       const audio = audioRef.current;
-      let now = (performance.now() - startRef.current) / 1000;
+      const sp = speedRef.current;
+      let now = ((performance.now() - startRef.current) / 1000) * sp;
       if (audio && !audio.paused && audio.currentTime > 0 && audio.currentTime < (audio.duration || Infinity)) {
         const drift = audio.currentTime - now;
         if (Math.abs(drift) > 0.25) {
-          startRef.current -= drift * 1000;
+          startRef.current -= (drift / sp) * 1000;
           now += drift;
         } else {
-          startRef.current -= drift * 1000 * 0.04;
+          startRef.current -= (drift / sp) * 1000 * 0.04;
+        }
+      }
+      // the free voice: a scene without its own voice is read aloud from where its narration starts (when the
+      // playhead lands in the middle of one, from about the word it would be saying)
+      if (freeVoiceRef.current && !mutedRef.current) {
+        const s = bundleRef.current.scenes.find((x) => now < x.start + x.duration);
+        if (s && spokenRef.current !== s.id) {
+          if (s.voiced && s.narration) {
+            // its real voice plays: a sentence still running from the scene before goes quiet
+            spokenRef.current = s.id;
+            speakerRef.current?.stop();
+          } else if (s.narration && s.kind !== "endscreen") {
+            const from = s.start + (s.cues?.[0] ?? s.lead ?? 0);
+            const length = Math.max(0.5, s.speech || 0);
+            if (now >= from && now < from + length) {
+              spokenRef.current = s.id;
+              speakerRef.current?.speak(fromFraction(speakable(s.narration), (now - from) / length), { rate: sp, voice: voiceRef.current });
+            }
+          }
         }
       }
       if (now >= bundleRef.current.duration) {
@@ -259,7 +308,31 @@ export default function Preview({ bundle, selectedScene, onSelectScene, onCommen
   useEffect(() => {
     if (commentDisabled) setCommentMode(false);
   }, [commentDisabled]);
-  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(rafRef.current);
+      speakerRef.current?.stop(); // leaving the editor ends the free voice too
+    },
+    [],
+  );
+
+  // a new speed: the playhead stays where it is and goes on at the new pace; the narration and the music
+  // follow it, and the free voice starts the scene's words again at the new rate
+  useEffect(() => {
+    speedRef.current = speed;
+    saveSpeed(speed);
+    if (audioRef.current) audioRef.current.playbackRate = speed;
+    if (musicRef.current) musicRef.current.playbackRate = speed;
+    if (playingRef.current) {
+      startRef.current = performance.now() - (tRef.current / speed) * 1000;
+      stopFreeVoice();
+    }
+  }, [speed, stopFreeVoice]);
+
+  // muted, or the free voice turned off (or another voice chosen): what it was saying stops now
+  useEffect(() => {
+    stopFreeVoice();
+  }, [muted, freeVoice, voice?.name, stopFreeVoice]);
 
   // keyboard: space, arrows, Home/End when not typing
   useEffect(() => {
@@ -486,6 +559,52 @@ export default function Preview({ bundle, selectedScene, onSelectScene, onCommen
         >
           {muted ? "Muted" : "Sound"}
         </button>
+        <select
+          className="mo-speed"
+          value={speed}
+          onChange={(e) => setSpeed(Number(e.target.value))}
+          aria-label="Playback speed"
+          title="Playback speed: the picture, the narration, the music and the free voice all follow it"
+        >
+          {SPEEDS.map((v) => (
+            <option key={v} value={v}>
+              {v}x
+            </option>
+          ))}
+        </select>
+        {supported() ? (
+          <button
+            type="button"
+            className={`btn btn-small ${freeVoice ? "btn-on" : ""}`}
+            onClick={() => setFreeVoice((v) => !v)}
+            disabled={!bundle.scenes.some((s) => s.narration && !s.voiced)}
+            title={
+              bundle.scenes.some((s) => s.narration && !s.voiced)
+                ? "Read the scenes that have no voice yet aloud with your browser's own text-to-speech: free, nothing billed. Online voices send the words to the browser maker's speech service."
+                : "Every scene has its voice: the preview plays it"
+            }
+          >
+            Free voice
+          </button>
+        ) : null}
+        {freeVoice && voices.length ? (
+          <select
+            className="mo-voice-pick"
+            value={voice?.name ?? ""}
+            onChange={(e) => {
+              setVoiceName(e.target.value);
+              saveVoiceName(e.target.value);
+            }}
+            aria-label="Free voice"
+            title="The browser voice that reads the script (online voices sound the most natural)"
+          >
+            {voices.map((v) => (
+              <option key={v.name} value={v.name}>
+                {voiceLabel(v)}
+              </option>
+            ))}
+          </select>
+        ) : null}
       </div>
 
       <div className="mo-timeline">

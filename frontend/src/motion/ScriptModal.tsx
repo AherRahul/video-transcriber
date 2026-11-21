@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 
 import { clock, motionApi } from "./api";
 import Markdown from "./Markdown";
+import ScriptListen from "./ScriptListen";
 import ScriptWords from "./ScriptWords";
 import type { ProjectView, ScriptView } from "./types";
 
@@ -30,7 +31,8 @@ type Props = {
 export default function ScriptModal({ projectId, view, running, initialTab, onSaved, onBuild, onClose }: Props) {
   const script = view.script;
   const [scriptView, setScriptView] = useState<ScriptView | null>(null);
-  const [tab, setTab] = useState<string>(initialTab ?? (script?.waiting ? "words" : "script"));
+  // the "Your words" step is gone (Claude writes the whole script): the dialog opens on the script itself
+  const [tab, setTab] = useState<string>(initialTab && initialTab !== "words" ? initialTab : "script");
   const [doc, setDoc] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -116,9 +118,6 @@ export default function ScriptModal({ projectId, view, running, initialTab, onSa
           </button>
         </header>
         <div className="mo-script-tabs" role="tablist">
-          <button type="button" role="tab" className={tab === "words" ? "on" : ""} onClick={() => setTab("words")}>
-            Your words{slotsLeft ? ` (${slotsLeft})` : ""}
-          </button>
           <button type="button" role="tab" className={tab === "script" ? "on" : ""} onClick={() => setTab("script")}>
             Script
           </button>
@@ -135,6 +134,8 @@ export default function ScriptModal({ projectId, view, running, initialTab, onSa
           {error ? <p className="error">{error}</p> : null}
           {tab === "words" ? <ScriptWords projectId={projectId} view={view} running={running} onSaved={onSaved} /> : null}
           {tab !== "words" && !scriptView ? <span className="spinner" /> : null}
+          {/* listen to the narration with the browser's free voice, above the script it reads */}
+          {scriptView && tab === "script" ? <ScriptListen scenes={view.bundle.scenes} /> : null}
           {scriptView && tab === "script" ? <MarkdownView text={scriptView.markdown} /> : null}
           {scriptView && tab === "chapters" ? (
             scriptView.chapters.length ? (

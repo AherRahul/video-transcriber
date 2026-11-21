@@ -2,8 +2,8 @@
 // got.
 //
 // - Where it sits: its playlist or course, its episode (or lecture) number and, for a course, its section.
-//   Moving it into a Udemy course makes it a Udemy video (the server turns off our logo, web address, promo
-//   and end screen); into a playlist, a YouTube one.
+//   Moving it into a Udemy course makes it a Udemy video (the server keeps our logo card and turns off the
+//   web address, promo and end screen); into a playlist, a YouTube one.
 // - Status: the steps it has been through (script, scenes, voice, export), downloaded (marked by itself when
 //   the MP4 is downloaded from the page) and uploaded (the user ticks it or pastes the video's link).
 // - What gets pasted, and nothing else: YouTube's title, post description and tags; Udemy's lecture title,
@@ -339,7 +339,7 @@ export default function DetailsModal({ projectId, title, version, onAsk, onChang
             {target && target.kind !== view.destination ? (
               <p className="mo-settings-note">
                 {target.kind === "udemy"
-                  ? "Moving it into a Udemy course makes it a Udemy video: no logo card, web address, promo or end screen, and no AlgoInsight in it."
+                  ? "Moving it into a Udemy course makes it a Udemy video: the AlgoInsight logo card stays, but no web address, promo or end screen, and no AlgoInsight in the script."
                   : "Moving it into a YouTube playlist makes it a YouTube video again, with the logo card, web address and end screen."}
               </p>
             ) : null}

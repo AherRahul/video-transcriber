@@ -25,7 +25,7 @@ export type BrandKit = {
 };
 
 /** The brand as the player sees it (a kit plus its logo URL). showLogo and showUrl follow the video's
- * closing settings (a Udemy film shows neither); missing means shown. */
+ * closing settings (a Udemy film shows the logo card, without the tagline, and no web address); missing means shown. */
 export type Brand = Omit<BrandKit, "id" | "style" | "builtin" | "logo" | "icon"> & {
   id: string | null;
   logoUrl: string | null;
@@ -110,7 +110,7 @@ export type Project = {
   settings: { model: string | null; effort: string | null; engine?: string | null };
   targetSeconds?: number | null;
   pronunciations?: Pronunciation[];
-  /** where the film goes: a Udemy film shows no website, URL, price or platform of ours */
+  /** where the film goes: a Udemy film shows no website, URL, price or platform of ours (only the logo card) */
   destination?: Destination;
   closing?: Closing;
   /** the YouTube thumbnail Claude designed (write_thumbnail); null or missing when there is none */
@@ -280,6 +280,8 @@ export type Destination = "youtube" | "udemy";
 export type Closing = { logo: boolean; url: boolean; promo: boolean; endscreen: boolean };
 
 export const DEFAULT_CLOSING: Closing = { logo: true, url: true, promo: false, endscreen: true };
+/** A Udemy film's, fixed (store.UDEMY_CLOSING): the AlgoInsight logo card and nothing else of ours. */
+export const UDEMY_CLOSING: Closing = { logo: true, url: false, promo: false, endscreen: false };
 
 /** The saved thumbnail: rev goes up on every new design, so the image URL changes with it. updatedAt
  * is in seconds, like the project's own times. */
@@ -313,6 +315,8 @@ export type ProjectSummary = {
   progress?: Progress;
   /** which platforms have publishing details written */
   details?: { youtube: boolean; udemy: boolean };
+  /** an export waiting for its slot or running now (several videos export at once) */
+  exporting?: { state: "queued" | "running"; percent: number | null; message: string };
 };
 
 export type ExportJob = {

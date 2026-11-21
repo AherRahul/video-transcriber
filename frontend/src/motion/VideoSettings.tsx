@@ -5,12 +5,14 @@
 // words before any scene code.
 //
 // A Udemy film can't show our website, URL, price or platform (the paper style guide's rule), so Udemy
-// turns all four off; the server enforces it too. The promo is drawn in the paper look only.
+// turns the web address, the promo and the end screen off. It keeps the AlgoInsight logo card (the
+// founder, 2026-11-21), drawn without the kit's tagline. All four are fixed for Udemy; the server enforces
+// it too. The promo is drawn in the paper look only.
 
 import { useEffect, useState } from "react";
 
 import { clock } from "./api";
-import { DEFAULT_CLOSING, TONE_OPTIONS, type Closing, type Destination, type ProjectView, type Tone } from "./types";
+import { DEFAULT_CLOSING, TONE_OPTIONS, UDEMY_CLOSING, type Closing, type Destination, type ProjectView, type Tone } from "./types";
 
 type Props = {
   view: ProjectView;
@@ -32,8 +34,11 @@ export function destinationOf(view: ProjectView): Destination {
 
 /** One line for the export panel: what this video is made for and what frames it. */
 export function closingSummary(view: ProjectView): string {
-  if (destinationOf(view) === "udemy") return "Made for Udemy: no logo card, web address, promo or end screen.";
   const c = closingOf(view);
+  if (destinationOf(view) === "udemy") {
+    // what the server says (a server started before 2026-11-21 still has the logo card off for Udemy)
+    return c.logo ? "Made for Udemy: the AlgoInsight logo card only (no tagline, web address, promo or end screen)." : "Made for Udemy: no logo card, web address, promo or end screen.";
+  }
   const on = [c.logo && "logo card", c.url && "web address", c.promo && "AlgoInsight promo", c.endscreen && "end screen"].filter(Boolean) as string[];
   const off = [!c.logo && "logo card", !c.url && "web address", !c.promo && "promo", !c.endscreen && "end screen"].filter(Boolean) as string[];
   return `Made for YouTube${on.length ? `: ${on.join(", ")}` : ""}${off.length ? ` (no ${off.join(", ")})` : ""}.`;
@@ -45,14 +50,14 @@ export default function VideoSettings({ view, disabled, onPatch }: Props) {
   const tone: Tone = shown?.tone ?? view.project.tone ?? "normal";
   const destination = shown?.destination ?? destinationOf(view);
   const udemyNow = destination === "udemy";
-  const closing = udemyNow ? { logo: false, url: false, promo: false, endscreen: false } : { ...closingOf(view), ...(shown?.closing ?? {}) };
+  // Udemy's are fixed: while the switch to Udemy is on its way, what Udemy gives; after it, what the server saved
+  const closing = udemyNow ? (shown?.destination === "udemy" ? UDEMY_CLOSING : closingOf(view)) : { ...closingOf(view), ...(shown?.closing ?? {}) };
   const udemy = udemyNow;
   const paper = view.bundle.theme === "paper";
   const promoScenes = view.bundle.scenes.filter((s) => s.kind === "promo");
   const promoUnvoiced = promoScenes.filter((s) => s.narration && !s.voiced).length;
   const target = view.project.targetSeconds ?? null;
   const plan = view.project.plan ?? null;
-  const review = !!view.project.scriptReview;
   const [minutes, setMinutes] = useState(target ? String(Math.round((target / 60) * 10) / 10) : "");
   const [busy, setBusy] = useState(false);
 
@@ -101,14 +106,16 @@ export default function VideoSettings({ view, disabled, onPatch }: Props) {
   }
 
   const lock = disabled || busy;
-  const row = (key: keyof Closing, title: string, hint: string, extraDisabled?: string) => {
+  // udemyHint: the line a Udemy film shows instead of the hint (the settings are fixed there)
+  const row = (key: keyof Closing, title: string, hint: string, extraDisabled?: string, udemyHint?: string) => {
     const off = udemy || !!extraDisabled;
+    const checked = udemy ? closing[key] : closing[key] && !extraDisabled;
     return (
-      <label className={`mo-check-row ${off ? "off" : ""}`} title={extraDisabled}>
-        <input type="checkbox" checked={!udemy && closing[key] && !extraDisabled} disabled={lock || off} onChange={(e) => setClosing(key, e.target.checked)} />
+      <label className={`mo-check-row ${off && !(udemy && checked) ? "off" : ""}`} title={extraDisabled}>
+        <input type="checkbox" checked={checked} disabled={lock || off} onChange={(e) => setClosing(key, e.target.checked)} />
         <span>
           <span className="mo-check-title">{title}</span>
-          <span className="muted small">{extraDisabled && !udemy ? extraDisabled : hint}</span>
+          <span className="muted small">{udemy && udemyHint ? udemyHint : extraDisabled && !udemy ? extraDisabled : hint}</span>
         </span>
       </label>
     );
@@ -126,13 +133,22 @@ export default function VideoSettings({ view, disabled, onPatch }: Props) {
           ))}
         </div>
         {udemy ? (
-          <p className="mo-settings-note">Udemy films can't show our website, URL, price or platform, so the logo card, web address, promo and end screen are off.</p>
+          <p className="mo-settings-note">
+            Udemy films can't show our website, URL, price or platform, so the web address, promo and end screen are off.
+            {closing.logo ? " The AlgoInsight logo card stays, without its tagline." : ""}
+          </p>
         ) : null}
       </div>
 
       <div className="mo-field">
         <span className="label">On every page</span>
-        {row("logo", "AlgoInsight logo card", "Top left on the paper, with the tagline under it; bottom left in other kits.")}
+        {row(
+          "logo",
+          "AlgoInsight logo card",
+          "Top left on the paper, with the tagline under it; bottom left in other kits.",
+          undefined,
+          closing.logo ? "Always on for Udemy: the icon and name, without the tagline." : "Restart the app to show it on Udemy films.",
+        )}
         {row("url", "Web address", "algoinsight.io, bottom right.")}
       </div>
 
@@ -184,15 +200,9 @@ export default function VideoSettings({ view, disabled, onPatch }: Props) {
 
       <div className="mo-field">
         <span className="label">The script</span>
-        <label className={`mo-check-row ${lock ? "off" : ""}`}>
-          <input type="checkbox" checked={review} disabled={lock} onChange={(e) => void run({ scriptReview: e.target.checked })} />
-          <span>
-            <span className="mo-check-title">Wait for my words before the scenes</span>
-            <span className="muted small">
-              Claude drafts the script with places for your own story, opinions and numbers, then waits while you rewrite and approve it in Script &gt; Your words.
-            </span>
-          </span>
-        </label>
+        {/* Claude writes the whole script and builds in one go (no "Your words" step since 2026-11-19); with a
+            reference, the video runs about as long as the reference and covers all of it */}
+        <p className="mo-settings-note">Claude writes the whole script and builds the scenes in one go. With a reference video, it runs about as long and covers everything it covers.</p>
         {plan ? (
           <p className="mo-settings-note">
             Shape: <b>{plan.shape}</b>, {plan.why}

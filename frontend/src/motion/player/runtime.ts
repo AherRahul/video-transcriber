@@ -266,7 +266,7 @@ export class Runtime {
         wordmark: brand.wordmark || brand.name,
         tagline: brand.tagline || "",
         iconUrl: brand.iconUrl,
-        // the video's settings: a Udemy film shows neither our logo card nor our web address
+        // the video's settings: a Udemy film shows our logo card (the server blanks its tagline) but no web address
         url: (brand as FrameBrand).showUrl === false ? "" : brand.endCard?.url || "",
         showLogo: (brand as FrameBrand).showLogo !== false,
         grainUrl: `${bundle.themeBase}paper/grain.png`,

@@ -126,8 +126,8 @@ export type Chrome = {
   setBare: (on: boolean) => void;
 };
 
-/** The frame over every page. showLogo false (a Udemy film: no platform of ours on screen) drops the logo
- *  card and its tagline; an empty url drops the web address. */
+/** The frame over every page. showLogo false drops the logo card and its tagline; an empty tagline (a Udemy
+ *  film: the card without the platform's line) drops only the tagline; an empty url drops the web address. */
 export function buildChrome(stage: HTMLElement, opts: { title: string; wordmark: string; tagline: string; iconUrl: string | null; url: string; grainUrl: string; showLogo?: boolean }): Chrome {
   const logo = opts.showLogo !== false;
   stage.querySelector("#chrome")?.remove();
