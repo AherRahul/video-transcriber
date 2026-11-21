@@ -70,8 +70,14 @@ function StatusTags({ p }: { p: ProjectSummary }) {
   const st = p.status ?? {};
   // before the export: the furthest of the making steps (downloaded and uploaded have their own tags)
   const making = pr.voiced ? "voiced" : pr.built ? "built" : pr.script ? "script" : "new";
+  const ex = p.exporting;
   return (
     <span className="mo-tags">
+      {ex ? (
+        <span className="mo-tag busy" title={ex.message}>
+          {ex.state === "queued" ? "Waiting to export" : `Exporting ${Math.round(ex.percent ?? 0)}%`}
+        </span>
+      ) : null}
       {!pr.exported ? <span className="mo-tag">{STAGE_LABEL[making]}</span> : <span className="mo-tag on">Exported</span>}
       {pr.downloaded ? (
         <span className="mo-tag on" title={st.downloadedAt ? `${st.downloadedFile ?? "The MP4"}, ${ago(st.downloadedAt)}` : undefined}>
@@ -110,6 +116,17 @@ export default function Library({ health, onOpen }: Props) {
     motionApi.listKits().then(setKits).catch(() => null);
   }, []);
   useEffect(load, [load]);
+
+  // while any video is exporting, its card's percentage is read again every few seconds (only the list:
+  // the playlists and kits don't change meanwhile)
+  const exporting = (projects ?? []).some((p) => p.exporting);
+  useEffect(() => {
+    if (!exporting) return;
+    const timer = window.setInterval(() => {
+      motionApi.listProjects().then(setProjects).catch(() => null);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [exporting]);
 
   // each playlist and course with its videos in episode order; the videos in none after them
   const { groups, loose } = useMemo(() => {

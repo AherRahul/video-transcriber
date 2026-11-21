@@ -241,11 +241,18 @@ $env:WHISPER_MODEL = "base"; .\backend\run.ps1
 
 ## 5. Using the app
 
-1. Paste the video link into **Video URL** and click **Transcribe**.
-2. Wait. You will see the steps: *Reading the video → Looking for captions*, and for videos without
-   captions also *Downloading the audio → Loading the speech model → Preparing the audio →
-   Turning speech into text*, with a percentage.
-3. Read the transcript. On the result:
+1. Paste one or more video links into **Video links** (one per line; Shift+Enter starts a new line) and
+   click **Transcribe** (it says *Transcribe 5 videos* when there are five). The box never locks: add more
+   links while others run.
+2. Each video goes into the **Videos** list under the form, newest first, with its own steps: *Reading the
+   video → Looking for captions*, and for videos without captions also *Downloading the audio → Loading the
+   speech model → Preparing the audio → Turning speech into text*, with a percentage. Several run at the
+   same time (section 7); a row that waits says what for. **Cancel** stops one, **Remove** takes a finished
+   one off the list, **Clear finished** takes them all. A video that failed (a site that didn't answer, a
+   dropped connection) or was cancelled has **Retry**: the same link with the same options goes back in the
+   queue in the same row, and the row counts the tries. **Retry failed (N)** in the list's header retries
+   every failed one; they still go through the download limit, so a slow site isn't hit all at once.
+3. Click a row to open its transcript below the list. On the result:
 
 | Control | What it does |
 |---------|--------------|
@@ -371,32 +378,29 @@ run programs or record screens (where a real recording belongs it leaves a marke
 1. **Start** with **Make a Motion video** under a finished transcript, **+ New video**, or the *AlgoInsight
    daily (narrated)* starter. Each opens the **New video** dialog, where everything is chosen before the video
    exists: **Made for** YouTube or Udemy, the **playlist or course** (or a new one) and the **episode**
-   (lecture) number, the Udemy **section**, the **script tone**, the **length** (empty lets the topic decide),
-   **Wait for my words**, and **your notes** (your take, a story, your numbers). The first message for Claude
-   is written from these choices (open *The first message Claude gets* to read it) and lands in the chat
-   box, where you can still change it before sending. A transcript comes along as a **reference**: research
-   for the topic, what viewers ask and what it gets wrong, never the outline or the length.
-2. **Claude asks you first** for what your notes leave out: your take on the topic, a real story (an
-   interview, a bug, a learner's question), your real numbers or runs, and which AlgoInsight lessons and
-   problems to use. It proposes the **shape** and **length** this topic needs, each with why. It sees the
-   shapes of your other videos, so the channel doesn't repeat itself, and the episodes either side of this
-   one in its playlist or course, so it builds on them instead of teaching them again. A length you set is
-   the only one enforced. The **script tone**: **Normal** (simple, warm English with a little character),
-   **Funny** (the same ideas with light, kind humour), **Focused** (knowledge-heavy and precise, still simple
-   English) or **Informational** (research papers and technical sources decoded in simple English, in a calm
-   tone; the *Research paper, decoded* starter sets it). Change it later from the top bar's **Tone** and a
-   note reminds you to ask Claude to rewrite the script in the new tone.
-3. Claude **checks the facts** (web search when it runs on Claude Code) and writes them to FACTS.md, plans
-   the **storyboard** in parts, and drafts the **script** for every scene (simple English, the voice rules:
-   no digits, dashes, brackets, symbols or SSML). Where only you can say it, it leaves a place for your
-   words, like `[[you: the interview where this went wrong, two or three sentences]]`, instead of making
-   it up. No run of eight or more of the reference's words in a row is allowed.
-4. **Your words.** A banner says the draft is ready. **Script > Your words** shows it scene by scene: rewrite
-   each scene the way you would say it, fill every `[[you: ...]]` place (each shows what it asks for), keep
-   the `<cue/>` marks, then **Approve and build the scenes**. No scene code is written until you approve,
-   the voice refuses a scene with an open place, and a scene you rewrote is marked **Your words**: Claude
-   changes it only when you ask. (**Video settings > Wait for my words before the scenes** turns this off
-   for a video.)
+   (lecture) number, the Udemy **section**, the **script tone**, the **length** and **your notes**. The first
+   message for Claude is written from these choices (open *The first message Claude gets* to read it) and lands
+   in the chat box, where you can still change it before sending. A transcript comes along as the
+   **reference**: the video covers every point it makes, nothing dropped, and runs about as long as it does
+   (90 to 120 percent of its length: a three-minute reference makes a three-minute video). A length you set
+   wins over the reference's; with neither, the topic decides.
+2. **Claude decides everything.** It asks you nothing and leaves no places for your words: it writes the take
+   and the opinions itself, in the narrator's voice, and tells a story as a worked example with someone from
+   the cast (never an invented memory of yours). It picks the **shape**, sees the shapes of your other videos
+   (so the channel doesn't repeat itself) and the episodes either side of this one in its playlist or course
+   (so it builds on them instead of teaching them again). The **script tone**: **Normal** (simple, warm
+   English with a little character), **Funny** (the same ideas with light, kind humour), **Focused**
+   (knowledge-heavy and precise, still simple English) or **Informational** (research papers and technical
+   sources decoded in simple English, in a calm tone; the *Research paper, decoded* starter sets it). Change it
+   later from the top bar's **Tone** and a note reminds you to ask Claude to rewrite the script in the new tone.
+3. Claude **checks the facts** (web search when it runs on Claude Code) and writes them to FACTS.md, with the
+   reference's points listed in order at the top, plans the **storyboard** in parts, and writes the **script**
+   for every scene (simple English, the voice rules: no digits, dashes, brackets, symbols or SSML). The script
+   check holds the scenes back until the script is inside the length window, copies no run of eight or more of
+   the reference's words, and has no `[[you: ...]]` place left (an older draft's places are Claude's to fill).
+4. **The scenes, in the same turn.** There is no review step: Claude builds every scene right after the script.
+   A scene you rewrite yourself (in the Script dialog or the scene's narration) is marked yours, and Claude
+   changes it only when you ask.
 5. **Script** in the top bar also shows the whole narration with its parts, labels, timings and cue marks,
    the **Chapters** (one per part) and Claude's documents (FACTS.md with sources, notes). Download or copy
    any of them.
@@ -427,19 +431,20 @@ run programs or record screens (where a real recording belongs it leaves a marke
 | **Change something** | Say it in the chat ("the estimate is thirty minutes", "make part two shorter"). Claude patches only what you asked for. |
 | **Point at it** | **Comment**, then click an element in the preview and write what should change. |
 | **Pick the tone** | In the **New video** dialog, and later the top bar's **Tone** (or **Video settings > Script tone**): Normal, Funny, Focused or Informational. Claude writes the draft in it. |
-| **Put it in your words** | **Script > Your words**: every scene's narration, editable in place, with the places Claude left for your stories, opinions and numbers. **Approve and build the scenes** when it's yours. |
 | **Edit it yourself** | The panel under the preview: a scene's narration, torn label, part, hold, transition, and its props (text, numbers, colours, images). **Code** shows the scene's source. A changed narration needs its voice again. |
 | **Undo** | Undoes Claude's last turn or your last edit, one step at a time. |
 | **Commands** | Type `/export`, `/undo`, `/clear` (a new chat that keeps the scenes) or `/new`. |
 | **Play** | Space plays and pauses (with the narration and sounds once the voice exists); left and right step one frame (Shift: one second); up and down move between scenes. **Guides** shows the safe area, **Sound** mutes the preview. |
+| **Speed** | The menu beside **Sound** plays the preview at 0.5x to 2x: the picture, the narration, the music and the free voice all follow it. The browser remembers it. |
+| **Free voice** | Hear a script before you pay for the real voice. **Free voice** (in the preview) reads each scene that has no voice yet aloud with the browser's own text-to-speech as it plays, from where its narration starts; scenes with a real voice play that instead. In **Script**, **Listen** reads the whole narration from any scene, with Pause, Resume (from the sentence it stopped on), Stop, the speed and the voice. Nothing is billed. Edge's natural "online" voices (Aria, Jenny...) sound best and send the words to Microsoft's speech service; the others stay on this computer. |
 | **Find a scene** | The scene strip under the preview: every scene with its number, name, length and voice dot, grouped by part; the promo and the end screen are marked. The arrows in the scene panel step through scenes too. |
-| **YouTube or Udemy** | The **For YouTube / For Udemy** button in the top bar. YouTube: choose the logo card, the web address, the AlgoInsight promo and the end screen. Udemy: none of them (a Udemy film shows no website, URL, price or platform of ours), and Claude is told to leave AlgoInsight out of the narration. The target length lives there too. |
+| **YouTube or Udemy** | The **For YouTube / For Udemy** button in the top bar. YouTube: choose the logo card, the web address, the AlgoInsight promo and the end screen. Udemy: always the AlgoInsight logo card (the icon and name, without the kit's tagline) and none of the others (a Udemy film shows no website, URL, price or platform of ours), and Claude is told to leave AlgoInsight out of the narration and its scenes. The target length lives there too. |
 
 ### Playlists, courses and Details
 
 A **YouTube playlist** or a **Udemy course** holds videos in order. A video's place is its episode (or
-lecture) number and, in a course, its section; putting it into a course makes it a Udemy video (no logo
-card, web address, promo or end screen, and no AlgoInsight in it), into a playlist a YouTube one. Claude
+lecture) number and, in a course, its section; putting it into a course makes it a Udemy video (the logo
+card only: no web address, promo or end screen, and no AlgoInsight in the script), into a playlist a YouTube one. Claude
 sees the place in every message: which episode this is, which come before and after, and the whole list,
 so each one builds on the last.
 
@@ -610,6 +615,14 @@ encoded on the laptop's GPU (Intel Quick Sync) when FFmpeg has it, otherwise wit
 is being captured; the scenes are then joined and the narration, the sounds and any music mixed last. The
 export result says which encoder ran and how many frames were captured.
 
+**Several videos at once.** Two videos export at the same time (`MOTION_EXPORTS`), each in its own
+background browser, so they never queue behind each other; a third waits for a free slot and its editor says
+so. The library's cards show **Exporting 45%** or **Waiting to export** for every one. An export alone
+captures with 3 pages; beside another it gets its share of `MOTION_PAGE_BUDGET` (4). Measured on this laptop
+(19 Nov 2026, a 112-second paper video at 4K): one export alone took 287 s; two at the same time finished
+both in 465 s, against 574 s one after the other (about 19% sooner). Each export on its own runs slower
+while another runs, so start the one you need soonest on its own first.
+
 **The audio finish.** The music is **ducked** under the voice: a sidechain compressor keyed by the
 narration pulls it about 10 dB down while the voice talks and lets it back up in the pauses and page
 changes. Then the whole mix is brought to YouTube's loudness, **-14 LUFS integrated with the true peak at
@@ -658,7 +671,20 @@ Measured on this laptop: a 15-minute talk took **3 min 33 s** with `small`. A ro
 waiting for every 4 minutes of video**. Videos *with* captions take a few seconds whatever their
 length.
 
-Whisper uses all CPU cores, so the app transcribes **one video at a time**. Others wait in a queue.
+**Several videos at once.** Paste many links and they are transcribed side by side. Each step has its own
+limit, so a long video never holds up the rest:
+
+| Step | At once | Setting |
+|------|---------|---------|
+| Reading the video and its captions | every video (quick network calls) | |
+| Downloading the audio (videos without captions) | 3 | `TRANSCRIBE_DOWNLOADS` |
+| Speech-to-text (Whisper), one model shared | 2, with 4 CPU threads each | `TRANSCRIBE_PARALLEL`, `WHISPER_THREADS` |
+| Screenshots, after the transcript | 2, in their own queue | `TRANSCRIBE_SCREENSHOTS` |
+
+A video with captions is done in seconds even while two others are in speech-to-text, and the next
+transcript no longer waits for the previous video's screenshots. Measured on this laptop (i5-13420H,
+19 Nov 2026): two videos through Whisper side by side took about 15% less time than one after the other.
+Six threads each was slower than four (the threads fight over the 8 cores), so four is the default.
 
 ---
 
@@ -772,7 +798,10 @@ npx tsc -b                                          # type-check the page
 | `GET /api/health` | `{ ok, ffmpeg, models, defaultModel }` |
 | `GET /api/busy` | Work a restart would cut short: `{ busy, transcriptions, exports, voice, claude }` (counts). The dev runner waits for it. |
 | `POST /api/jobs` with body `{ "url": "...", "language": "en", "model": "small", "forceWhisper": false, "screenshots": true }` | Starts a transcription and returns `{ "id": "..." }`. Only `url` is required. |
-| `GET /api/jobs/{id}` | `state` (`queued` / `running` / `done` / `error`), `stage`, `percent`, `message`, `transcript` when done, and `frames` (how the screenshots are going) |
+| `GET /api/jobs` | Every job in memory, newest first, without the transcripts (a finished one has a `summary`: source, language, length, lines) |
+| `GET /api/jobs/{id}` | `state` (`queued` / `running` / `done` / `error` / `cancelled`), `stage` (`waiting` while it waits for a download or speech-to-text slot), `percent`, `message`, `title` once known, `transcript` when done, and `frames` (how the screenshots are going) |
+| `POST /api/jobs/{id}/cancel` | Stops a waiting or running transcription |
+| `DELETE /api/jobs/{id}` | Forgets a finished one (its screenshots stay on disk) |
 | `GET /api/jobs/{id}/download?format=txt\|srt\|vtt&timestamps=true\|false` | The transcript as a file |
 | `GET /api/jobs/{id}/frames` | The screenshots: `{ state, percent, message, items: [{ t, url, file, text }] }`. `state` is `off`, `waiting`, `running`, `done` or `none` (then `message` says why). Answered from disk after a restart. |
 | `GET /api/jobs/{id}/frames/{file}` | One screenshot (JPEG) |
@@ -793,7 +822,7 @@ Invoke-RestMethod "http://127.0.0.1:8765/api/jobs/$($job.id)"
 |------|---------------|
 | `backend/transcriber.py` | `transcribe_url()` runs the whole flow: `fetch_info` → `fetch_captions` (picks the track, reads json3 / VTT / SRT, follows HLS caption playlists, removes rolling repeats) → `download_audio` → `decode_audio` (FFmpeg) → `run_whisper`. Also friendly error messages and the `to_txt` / `to_srt` / `to_vtt` formats. |
 | `backend/screenshots.py` | The screenshots: `download_video` (720p video only), `scene_changes` and `pick_moments` (scene cuts plus the 15 s grid), `extract_frame`, `text_around` (what is said then), `take_screenshots` (all of that on a local file), the job folder, the zip and the 14-day clean-up. |
-| `backend/app.py` | FastAPI: the job queue (one worker thread, jobs in memory, at most 50 kept), the endpoints, and serving `frontend/dist`. |
+| `backend/app.py` | FastAPI: the job queue (several videos at once, with separate limits for downloads, speech-to-text and screenshots; jobs in memory, at most 50 kept), the endpoints, and serving `frontend/dist`. |
 | `backend/dev.py` | Hot reload for development (`run.ps1 -Dev`): restarts the server when a backend `.py` file changes, after any running work (`/api/busy`). |
 | `backend/test_transcriber.py` | Offline unit tests (the screenshots run on a test video FFmpeg makes). |
 | `frontend/src/App.tsx` | The page: form, options, progress, transcript, search, copy and download, and the video prompt under a transcript. |
@@ -817,7 +846,7 @@ Invoke-RestMethod "http://127.0.0.1:8765/api/jobs/$($job.id)"
 | `backend/motion/kitdata.py` | The kit as the backend reads it: find_icons, the checks for icon, logo and person names, and the cast list in the system prompt. |
 | `backend/motion/broll.py` | B-roll: clip conversion (a background worker), the Pexels and Pixabay search and import, and the credits. |
 | `backend/motion/render.py` | Headless Edge/Chrome through Playwright: one frame with a layout report (for Claude's checks and posters), and the MP4 export (per-scene H.264, content-hash cache, concat, soundtrack). |
-| `backend/motion/brand.py`, `hub.py`, `jobs.py`, `api.py` | Brand kit from a website; the chat log and live updates; the export queue; the HTTP routes. |
+| `backend/motion/brand.py`, `hub.py`, `jobs.py`, `api.py` | Brand kit from a website; the chat log and live updates; the export queue (several videos at once, each on a renderer lane of its own); the HTTP routes. |
 | `backend/test_motion.py` | Offline Motion tests (no API key, browser or network). |
 | `frontend/motion-player.html`, `frontend/src/motion/player/` | The player: builds each scene in its own shadow root with a paused GSAP timeline and shows any moment on request. The preview and the export both use it, so the MP4 matches the preview. |
 | `frontend/src/motion/` | The Motion pages: library, editor, chat, preview, properties, brand kit dialog. |
@@ -836,7 +865,13 @@ Invoke-RestMethod "http://127.0.0.1:8765/api/jobs/$($job.id)"
 | `TRANSCRIBER_DATA_DIR` | `transcriber-data` next to `backend` | Where the screenshots are kept (`frames\<job id>\`) |
 | `MOTION_DATA_DIR` | `motion-data` next to `backend` | Where Motion keeps its videos and brand kits |
 | `MOTION_BROWSER_CHANNEL` | `msedge`, then `chrome` | Which installed browser renders Motion's frames |
-| `MOTION_RENDER_PAGES` | `3` | Browser pages that render scenes at the same time during an export |
+| `MOTION_RENDER_PAGES` | `3` | Browser pages that render scenes at the same time during an export (one export alone) |
+| `MOTION_EXPORTS` | `2` | Videos that export at the same time (1 to 4), each in its own background browser |
+| `MOTION_PAGE_BUDGET` | `4` | Capture pages shared by exports running together (each gets its share) |
+| `TRANSCRIBE_PARALLEL` | `2` | Videos in speech-to-text at the same time (1 to 4), sharing one Whisper model |
+| `WHISPER_THREADS` | `4` | CPU threads for each video's speech-to-text |
+| `TRANSCRIBE_DOWNLOADS` | `3` | Audio downloads at the same time |
+| `TRANSCRIBE_SCREENSHOTS` | `2` | Videos whose screenshots are taken at the same time |
 
 The server listens on `127.0.0.1` only, so other computers on the network can't reach it.
 

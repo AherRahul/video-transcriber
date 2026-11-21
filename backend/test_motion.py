@@ -251,22 +251,30 @@ class SourceTests(unittest.TestCase):
     def attach(self):
         return self.agent._attachment_blocks(self.pid, "transcript-lesson1.txt")
 
-    def test_a_timed_attachment_is_research_only(self):
+
+    def test_a_timed_attachment_is_the_reference(self):
         blocks = self.attach()
-        self.assertIn("is a reference (10:08 by its timestamps): research for the topic only", blocks[-1]["text"])
-        self.assertIn("Never follow its outline, order, examples or length", blocks[-1]["text"])
+        self.assertIn("is the reference (10:08 by its timestamps): cover every point it makes, nothing dropped", blocks[-1]["text"])
         p = self.store.get_project(self.pid)
-        self.assertIsNone(p["targetSeconds"])  # the reference's length sets nothing
-        self.assertTrue(p["scriptReview"])  # a new video waits for the user's words
+        self.assertIsNone(p["targetSeconds"])  # the user set no length: the reference's own sets it (length_target)
+        self.assertFalse(p["scriptReview"])  # no video waits for the user's words any more
+        self.assertEqual(self.store.length_target(self.pid, p)[:2], (608.0, "reference"))
         src = self.store.get_source(self.pid)
         self.assertEqual(len(src["lines"]), 6)  # the title and the link are not lines
         self.assertEqual(src["lines"][3], {"t": 270.0, "text": "The time between a request and its answer is called latency."})
         listing, label = self.agent._tool(self.pid, "read_source", {"from": "4:00"})
-        self.assertIn("research for the topic only", listing)
+        self.assertIn("the reference: the video covers every point it makes, in about its length", listing)
         self.assertIn("[4:30] The time between a request and its answer is called latency.", listing)
-        self.assertNotIn("NOT COVERED", listing)
         self.assertEqual(label, "Read the reference (3 lines)")
-        self.assertIn("reference: transcript-lesson1.txt, 10:08, 6 timed lines (research only", self.store.state_summary(self.pid))
+        state = self.store.state_summary(self.pid)
+        self.assertIn("reference: transcript-lesson1.txt, 10:08, 6 timed lines (the video covers every point it makes", state)
+        self.assertIn("length: about the reference's own 10:08", state)
+        # copying it word for word is still refused
+        self.store.write_storyboard(self.pid, [{"id": "b", "name": "Latency", "idea": "y", "transition": "tear"}])
+        self.store.write_script(self.pid, [{"id": "b", "narration": "A model is a function whose behavior is learned from data, not written by a developer."}])
+        joined = " ".join(self.store.plan_review(self.pid)["problems"])
+        self.assertIn("repeat the reference word for word", joined)
+        self.assertIn('b: "a model is a function whose behavior is learned from data not written by a developer"', joined)
 
     def test_transcript_formats_and_plans(self):
         srt = "1\n00:00:01,000 --> 00:00:04,000\nHello there\nand welcome\n\n2\n00:01:05,500 --> 00:01:08,000\nSecond cue\n"
@@ -277,96 +285,73 @@ class SourceTests(unittest.TestCase):
             with self.assertRaises(StoreError):
                 store_mod.clean_plan(bad)
 
-    def test_scene_code_waits_for_the_plan_the_wording_and_the_users_words(self):
-        self.attach()
+
+    def test_claude_writes_every_word_and_never_waits(self):
+        # no reference here: the topic decides the length
         self.store.write_storyboard(self.pid, [
             {"id": "a", "name": "The queue", "idea": "x", "transition": "tear", "narration": talk(60)},
             {"id": "b", "name": "Latency", "idea": "y", "transition": "turn", "narration": talk(60, "Kabir")},
         ])
-        # no plan yet: the shape and length come first
-        self.assertIn("Choose this video's shape and length for its topic first", " ".join(self.store.plan_review(self.pid)["problems"]))
-        with self.assertRaises(StoreError) as refused:
-            self.agent._tool(self.pid, "write_scene", {"id": "a", "html": SCENE})
-        self.assertIn("isn't ready for scene code", str(refused.exception))
-
-        # copying the reference word for word is refused
-        self.store.write_storyboard(self.pid, [
-            {"id": "a", "name": "The queue", "idea": "x", "transition": "tear"},
-            {"id": "b", "name": "Latency", "idea": "y", "transition": "turn"},
-        ], plan=PLAN)
-        self.store.write_script(self.pid, [{"id": "b", "narration": "A model is a function whose behavior is learned from data, not written by a developer."}])
-        joined = " ".join(self.store.plan_review(self.pid)["problems"])
-        self.assertIn('repeat the reference word for word', joined)
-        self.assertIn('b: "a model is a function whose behavior is learned from data not written by a developer"', joined)
-
-        # an own draft with a place for the user's words: no problems, but it waits for the user
+        self.assertEqual(self.store.plan_review(self.pid)["problems"], [])  # no plan, no approval needed first
+        # a place left for the user's words is Claude's to fill: scene code is refused until it does
         content, _ = self.agent._tool(self.pid, "write_script", {"scenes": [
             {"id": "a", "narration": talk(60)},
             {"id": "b", "narration": talk(40, "Kabir") + " [[you: the interview where you got latency wrong, two sentences]]"},
         ]})
-        self.assertIn("1 place left for the user's own words", content)
-        self.assertIn("Now stop: the user puts the script in their own words", content)
+        self.assertIn("1 place for the user's words still to write yourself", content)
         review = self.store.plan_review(self.pid)
-        self.assertEqual(review["problems"], [])
-        self.assertEqual(review["waiting"]["slots"], [{"id": "b", "name": "Latency", "asks": ["the interview where you got latency wrong, two sentences"]}])
-        self.assertEqual(vc.check_narration("Kabir waits. [[you: your number, like 42 ms]]"), [])  # a place isn't narration yet
+        self.assertIn("1 place for the user's own words left (b): write each one yourself", " ".join(review["problems"]))
+        self.assertIsNone(review["waiting"])
         with self.assertRaises(StoreError) as refused:
             self.agent._tool(self.pid, "write_scene", {"id": "a", "html": SCENE})
-        self.assertIn("puts the script in their own words and approves it", str(refused.exception))
-        state = self.store.state_summary(self.pid)
-        self.assertIn("script: waiting for the user to put it in their own words and approve it (0 of 2 narrated scenes rewritten, 1 place left", state)
-        self.assertIn('plan: shape story (one evening at a food stall shows the whole idea); about 6 min (one idea with one worked example)', state)
-
-        # the voice and the approval both refuse an open place
+        self.assertIn("isn't ready for scene code", str(refused.exception))
         from motion.jobs import VoiceJobs
 
         with self.assertRaises(StoreError) as refused:
             VoiceJobs(self.store, self.hub, lambda: None).start(self.pid)
         self.assertIn("b still has a place for your own words", str(refused.exception))
-        with self.assertRaises(StoreError) as refused:
-            self.store.approve_script(self.pid)
-        self.assertIn("1 place still waits for your own words (b)", str(refused.exception))
-
-        # the user writes it in their own words: those are theirs, and Claude can't change them unasked
+        # Claude writes it in: the scenes are built in the same turn, nobody waits
+        self.agent._tool(self.pid, "write_script", {"scenes": [{"id": "b", "narration": talk(40, "Kabir") + " The one thing to remember is that latency is waiting time, not speed."}]})
+        self.assertEqual(self.store.plan_review(self.pid)["problems"], [])
+        self.assertFalse(self.store.script_state(self.pid)["waiting"])
+        content, _ = self.agent._tool(self.pid, "write_scene", {"id": "a", "html": SCENE})
+        self.assertIn("Scene a saved", content)
+        self.assertNotIn("waiting for the user", self.store.state_summary(self.pid))
+        # narration the user rewrote themselves stays theirs: Claude changes it only when asked
         p = self.store.get_project(self.pid)
         rev = next(s for s in p["scenes"] if s["id"] == "b")["rev"]
-        self.store.edit_scene(self.pid, "b", {"narration": talk(40, "Kabir") + " I once said latency was the same as speed, and the interviewer stopped me."}, rev)
+        self.store.edit_scene(self.pid, "b", {"narration": talk(40, "Kabir") + " I once said latency was the same as speed."}, rev)
         self.assertEqual(self.store.script_state(self.pid)["byUser"], 1)
         with self.assertRaises(StoreError) as refused:
             self.agent._tool(self.pid, "write_script", {"scenes": [{"id": "b", "narration": talk(30, "Kabir")}]})
         self.assertIn("in the user's own words", str(refused.exception))
-        self.agent._tool(self.pid, "write_script", {"scenes": [{"id": "b", "label": "Latency, really"}]})  # no narration: fine
-        self.assertTrue(next(s for s in self.store.get_project(self.pid)["scenes"] if s["id"] == "b")["byUser"])
-        self.assertIn("- your words", self.store.script_markdown(self.pid))
-
-        # approved: the scenes may be built, and the user's words stay as they are
-        p = self.store.approve_script(self.pid)
-        self.assertTrue(p["script"]["approved"])
-        self.assertIsNone(self.store.plan_review(self.pid)["waiting"])
-        content, _ = self.agent._tool(self.pid, "write_scene", {"id": "a", "html": SCENE})
-        self.assertIn("Scene a saved", content)
-        self.assertIn("script: approved by the user (1 of 2 narrated scenes in their own words", self.store.state_summary(self.pid))
-        md = self.store.script_markdown(self.pid)
-        self.assertIn("Shape: story (one evening at a food stall shows the whole idea). Length: about 6 min (one idea with one worked example).", md)
-        self.assertNotIn("Source coverage", md)
-
-        # asked by the user, Claude may change their words (and they are Claude's again)
         self.agent._tool(self.pid, "write_script", {"scenes": [{"id": "b", "narration": talk(30, "Kabir")}], "replaceOwnWords": True})
         self.assertFalse(next(s for s in self.store.get_project(self.pid)["scenes"] if s["id"] == "b")["byUser"])
-        self.store.reopen_script(self.pid)
-        self.assertTrue(self.store.script_state(self.pid)["waiting"])  # b has no code yet: Claude waits for the user again
-        self.assertFalse(self.store.get_project(self.pid)["script"]["approved"])
 
-    def test_only_a_length_the_user_set_is_enforced(self):
-        self.attach()
-        self.store.update_project(self.pid, {"scriptReview": False})
+
+    def test_the_reference_sets_the_length_unless_the_user_set_one(self):
+        self.attach()  # a 10:08 reference: the video must run 9:07 to 12:09
         self.store.write_storyboard(self.pid, [{"id": "a", "name": "Queue", "idea": "x", "transition": "tear", "narration": talk(60)}])
-        self.assertEqual(self.store.plan_review(self.pid)["problems"], [])  # the topic decides: no length is forced
+        joined = " ".join(self.store.plan_review(self.pid)["problems"])
+        self.assertIn("the reference's length (10:08) needs at least", joined)
+        self.assertIn("Check every point the reference makes is covered; never pad.", joined)
+        # far too long: tighten, never drop one of its points
+        self.store.write_storyboard(self.pid, [
+            {"id": k, "name": k, "idea": "x", "transition": "tear", "narration": talk(700, "Meera" if i % 2 else "Kabir")} for i, k in enumerate("abcd")
+        ])
+        joined = " ".join(self.store.plan_review(self.pid)["problems"])
+        self.assertIn("the reference's length (10:08) allows at most", joined)
+        self.assertIn("never one of its points", joined)
+        # a length the user set wins over the reference's
         self.store.update_project(self.pid, {"targetSeconds": 600})
+        self.store.write_storyboard(self.pid, [{"id": "a", "name": "Queue", "idea": "x", "transition": "tear", "narration": talk(60)}])
         joined = " ".join(self.store.plan_review(self.pid)["problems"])
         self.assertIn("the length the user set (10:00) needs at least 9:00", joined)
-        self.assertIn("never pad", joined)
         self.assertIn("length the user set: 10:00", self.store.state_summary(self.pid))
+        # no reference and no length of the user's: the topic decides, nothing is forced
+        other = self.store.create_project("No reference", "16:9", "algoinsight-paper")["id"]
+        self.store.write_storyboard(other, [{"id": "a", "name": "Queue", "idea": "x", "transition": "tear", "narration": talk(60)}])
+        self.assertEqual(self.store.plan_review(other)["problems"], [])
 
     def test_a_short_from_a_long_talk(self):
         self.attach()
@@ -384,16 +369,16 @@ class SourceTests(unittest.TestCase):
         self.assertIn('"Older video" compare', line)
         self.assertIn('"Before plans" shape not recorded', line)
 
-    def test_a_video_from_before_the_review_doesnt_wait(self):
+
+    def test_an_older_video_with_the_review_on_never_waits(self):
         p = self.store.get_project(self.pid)
-        p.pop("scriptReview")
+        p["scriptReview"] = True  # switched on before the words step was taken out
         store_mod.write_json(self.store._dir(self.pid) / "project.json", p)
-        self.store.write_storyboard(self.pid, [{"id": "a", "name": "Queue", "idea": "x", "transition": "tear", "narration": talk(60) + " [[you: a story]]"}])
+        self.store.write_storyboard(self.pid, [{"id": "a", "name": "Queue", "idea": "x", "transition": "tear", "narration": talk(60)}])
         review = self.store.plan_review(self.pid)
-        self.assertEqual(review["problems"], [])  # no plan needed
+        self.assertEqual(review["problems"], [])  # no plan and no approval needed
         self.assertIsNone(review["waiting"])
         self.agent._tool(self.pid, "write_scene", {"id": "a", "html": SCENE})
-
 
 class ToneTests(unittest.TestCase):
     """The script's tone: normal, funny, focused or informational, picked per video."""
@@ -496,7 +481,8 @@ class PublishingTests(unittest.TestCase):
         course = store.create_collection("udemy", "System design from zero")
         a = store.create_project("Load balancers", "16:9", "algoinsight-paper", collection={"id": course["id"], "section": "Scaling"})
         self.assertEqual(a["destination"], "udemy")
-        self.assertFalse(any(store.get_project(a["id"])["closing"].values()))  # no logo, address or end screen
+        # the logo card, but no web address, promo or end screen
+        self.assertEqual(store.get_project(a["id"])["closing"], {"logo": True, "url": False, "promo": False, "endscreen": False})
         b = store.create_project("Caches", "16:9", "algoinsight-paper", collection={"id": course["id"]})
         self.assertEqual(b["collection"]["section"], "Scaling")  # the section of the lecture before it
         self.assertIn('lecture 2 of 2 in the Udemy course "System design from zero", section "Scaling"', store.state_summary(b["id"]))
@@ -1165,7 +1151,9 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(cc._mcp_content("done"), [{"type": "text", "text": "done"}])
         blocks = [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "QUJD"}}, {"type": "text", "text": "report"}]
         self.assertEqual(cc._mcp_content(blocks), [{"type": "image", "data": "QUJD", "mimeType": "image/jpeg"}, {"type": "text", "text": "report"}])
-        self.assertIn("isn't logged in", cc._assistant_error("Invalid API key · Please run /login"))
+        signin = cc._assistant_error("Invalid API key · Please run /login")
+        self.assertIn("couldn't sign in", signin)
+        self.assertIn("Claude Code said: Invalid API key · Please run /login", signin)  # the cause is never hidden
         self.assertIn("usage limit", cc._assistant_error("Claude AI usage limit reached"))
 
     def test_source_length_from_timestamps(self):
@@ -1466,7 +1454,8 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(c.get(f"/api/motion/projects/{pid}").json()["project"]["closing"]["promo"])
         r = c.patch(f"/api/motion/projects/{pid}", json={"destination": "udemy"})
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertFalse(c.get(f"/api/motion/projects/{pid}/bundle").json()["brand"]["showLogo"])
+        brand = c.get(f"/api/motion/projects/{pid}/bundle").json()["brand"]
+        self.assertEqual((brand["showLogo"], brand["showUrl"], brand["tagline"]), (True, False, ""))
         self.assertEqual(c.patch(f"/api/motion/projects/{pid}", json={"closing": {"promo": True}}).status_code, 400)
         c.delete(f"/api/motion/projects/{pid}")
 
@@ -1553,15 +1542,25 @@ class ClosingTests(unittest.TestCase):
         self.assertEqual(self.ids()[-1], ("end", "endscreen"))
         self.assertFalse((self.store._dir(self.pid) / "scenes" / "algoinsight-1.html").exists())
 
-    def test_udemy_shows_nothing_of_ours(self):
+    def test_udemy_shows_only_our_logo_card(self):
         self.store.update_project(self.pid, {"closing": {"promo": True}})
         self.store.update_project(self.pid, {"destination": "udemy"})
         self.assertEqual(self.ids(), [("a", "scene"), ("b", "scene")])
         b = self.store.bundle(self.pid)
-        self.assertEqual((b["brand"]["showLogo"], b["brand"]["showUrl"]), (False, False))
+        # the logo card (icon and wordmark, no tagline), no web address
+        self.assertEqual((b["brand"]["showLogo"], b["brand"]["showUrl"], b["brand"]["tagline"]), (True, False, ""))
         self.assertIn("made for: Udemy", self.store.state_summary(self.pid))
-        with self.assertRaises(StoreError):
-            self.store.update_project(self.pid, {"closing": {"endscreen": True}})
+        self.assertIn("the frame draws the AlgoInsight logo card", self.store.state_summary(self.pid))
+        for change in ({"endscreen": True}, {"url": True}, {"promo": True}, {"logo": False}):
+            with self.assertRaises(StoreError):
+                self.store.update_project(self.pid, {"closing": change})
+        self.store.update_project(self.pid, {"closing": {"logo": True, "promo": False}})  # what it already is: fine
+        # a Udemy video saved before the logo card (all four off) shows it now
+        p = self.store.get_project(self.pid)
+        p["closing"] = {"logo": False, "url": False, "promo": False, "endscreen": False}
+        store_mod.write_json(self.store._dir(self.pid) / "project.json", p)
+        self.assertTrue(self.store.get_project(self.pid)["closing"]["logo"])
+        self.assertTrue(self.store.bundle(self.pid)["brand"]["showLogo"])
         self.store.update_project(self.pid, {"destination": "youtube"})
         self.assertEqual(self.store.get_project(self.pid)["closing"], {"logo": True, "url": True, "promo": False, "endscreen": True})
         self.assertEqual(self.ids()[-1], ("end", "endscreen"))
@@ -1607,8 +1606,9 @@ class StubRenderer:
     async def export(self, *args):
         raise AssertionError
 
-    def call(self, fn, *args, timeout=0):
+    def call(self, fn, *args, timeout=0, **kwargs):
         self.calls.append((fn.__name__, args))
+        self.kwargs = kwargs
         if fn.__name__ == "preview_frame":
             return JPEG, dict(CLEAN_DIAG)
         if fn.__name__ == "audit":
@@ -1734,6 +1734,72 @@ class CaptionTests(unittest.TestCase):
             self.assertEqual(links[fmt], f"/api/motion/projects/{self.pid}/renders/{mp4[:-4]}.{fmt}")
             f = self.store.renders_dir(self.pid) / f"{mp4[:-4]}.{fmt}"
             self.assertIn("An LLM reads", f.read_text(encoding="utf-8"))
+
+
+class ParallelExportTests(unittest.TestCase):
+    """Several videos export at once, each on a lane (a renderer) of its own; one more waits for a free lane."""
+
+    def test_two_videos_export_at_once_and_a_third_waits(self):
+        from motion import jobs as jb
+
+        store = new_store()
+        release = threading.Event()
+        seen = {"inside": 0, "most": 0, "lanes": set(), "pages": []}
+        lock = threading.Lock()
+
+        class LaneStub(StubRenderer):
+            def clone(self):
+                return LaneStub()
+
+            async def release(self):
+                return None
+
+            def call(self, fn, *args, timeout=0, **kwargs):
+                if fn.__name__ == "release":
+                    return None
+                if fn.__name__ == "export":
+                    with lock:
+                        seen["inside"] += 1
+                        seen["most"] = max(seen["most"], seen["inside"])
+                        seen["lanes"].add(id(self))
+                        seen["pages"].append(kwargs.get("pages"))
+                    release.wait(10)
+                    with lock:
+                        seen["inside"] -= 1
+                return super().call(fn, *args, timeout=timeout, **kwargs)
+
+        main = LaneStub()
+        exports = jb.Exports(store, main, Hub(store), lambda: None, slots=2)
+        pids = [store.create_project(f"Video {i}", "16:9", "algoinsight-paper")["id"] for i in range(3)]
+
+        def submit(pid):
+            exports._jobs[pid] = {"state": "queued"}
+            exports._pool.submit(exports._run, pid, store.bundle(pid), None, "ffmpeg", 1080, threading.Event(), False, False, False, None)
+
+        def wait_inside(n):
+            end = time.time() + 10
+            while seen["most"] < n and time.time() < end:
+                time.sleep(0.02)
+
+        submit(pids[0])  # the first alone, then two more while it runs
+        wait_inside(1)
+        submit(pids[1])
+        submit(pids[2])
+        wait_inside(2)
+        time.sleep(0.2)  # the third would have started by now if it could
+        self.assertEqual(seen["most"], 2)
+        self.assertEqual(sum(1 for pid in pids if exports.status(pid)["state"] == "queued"), 1)
+        self.assertEqual(set(exports.live()), set(pids))  # the library's cards: two running, one waiting
+        release.set()
+        exports._pool.shutdown(wait=True)
+        self.assertEqual([exports.status(pid)["state"] for pid in pids], ["done"] * 3)
+        self.assertEqual(seen["most"], 2)
+        self.assertEqual(len(seen["lanes"]), 2)  # two lanes, reused by the third; never the editor's renderer
+        self.assertNotIn(id(main), seen["lanes"])
+        # alone, an export takes every page it wants; beside another, its share of the budget
+        self.assertEqual(seen["pages"][0], rd.DEFAULT_PAGES)
+        self.assertEqual(seen["pages"][1], max(1, jb.PAGE_BUDGET // 2))
+        self.assertEqual(exports.live(), {})
 
 
 def _ffmpeg():
@@ -2161,23 +2227,23 @@ class PublishingPromptTests(unittest.TestCase):
         self.assertNotIn("\u2014", SYSTEM_PROMPT)  # hyphens, never em dashes
         self.assertGreaterEqual(int(rd.RUNTIME_VERSION), 6)  # the player that has these tools (cached scenes redone)
 
-    def test_the_prompt_starts_from_the_user_not_a_reference(self):
-        """References are research; the outline, the stories and the numbers are the user's; each video's shape
-        and length fit its topic."""
+
+    def test_the_prompt_follows_the_reference_and_decides_everything(self):
+        """A reference sets what the video covers and how long it runs; Claude decides everything itself and leaves
+        no places for the user's words (the founder, 2026-11-19)."""
         from motion.prompts import SYSTEM_PROMPT, TOOLS
 
         for phrase in (
-            "A reference (another creator's video, attached as a timed transcript, or screenshots of it) is research only",
-            "Never follow its outline, its order, its examples, its story or its length",
-            "Ask first. Before any outline",
-            "don't repeat the latest ones unless this topic needs it",
-            "Never pad to reach a length",
-            "[[you: what goes here, in a few words]]",
-            "write_scene is refused until then",
+            "the video covers EVERY point it makes, nothing dropped, and runs about as long as it does",
+            "a three-minute reference is a three-minute video, never ten",
+            "Decide everything yourself. Never ask the user for their take",
+            "never as an invented memory of the user's or a made-up real event",
+            "Our own words always (a run of eight or more of its words in a row is refused)",
+            "there is no review step",
             "never change it unless they ask, and then send it with replaceOwnWords: true",
         ):
             self.assertIn(phrase, SYSTEM_PROMPT)
-        for gone in ("Teach every point it teaches", "covers", "sourceSkips", "10 to 30 minutes"):
+        for gone in ("Ask first. Before any outline", "[[you: what goes here, in a few words]]", "write_scene is refused until then", "is research only", "sourceSkips", "10 to 30 minutes"):
             self.assertNotIn(gone, SYSTEM_PROMPT)
         by_name = {t["name"]: t["input_schema"]["properties"] for t in TOOLS}
         self.assertEqual(by_name["write_storyboard"]["plan"]["properties"]["shape"]["enum"], list(store_mod.SHAPES))

@@ -236,6 +236,219 @@ a:focus-visible {
   font-size: 1.1rem;
 }
 
+.status-title {
+  margin: 0 0 10px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* ── Several links at once, and the list of videos ──────────────── */
+
+/* the links box grows to four lines once there is more than one link; the button stays on its first line */
+.row-top {
+  align-items: flex-start;
+}
+
+textarea.links {
+  resize: vertical;
+  min-height: 42px;
+  line-height: 1.45;
+}
+
+.hint {
+  margin: 8px 0 0;
+}
+
+.options-note {
+  margin: 10px 0 0;
+}
+
+.queue {
+  padding: 16px 20px;
+}
+
+.queue-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.queue-head h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.queue-clear {
+  margin-left: auto;
+  align-self: center;
+}
+
+/* Retry failed sits before Clear finished, both pushed to the right */
+.queue-retry-all {
+  margin-left: auto;
+  align-self: center;
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.queue-retry-all + .queue-clear {
+  margin-left: 0;
+}
+
+/* a finished row's buttons: Retry (failed or cancelled) and Remove */
+.queue-actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+  align-self: center;
+}
+
+.queue-actions .btn-small {
+  align-self: center;
+}
+
+.btn-retry {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* a long list scrolls inside the card, so the open transcript stays near */
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.queue-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 8px;
+  padding: 2px 4px 2px 0;
+}
+
+.queue-row.on {
+  background: var(--primary-soft);
+}
+
+.queue-row > .btn-small {
+  align-self: center;
+  flex: none;
+}
+
+/* the row's main part is one button (opens the transcript); min-width 0 lets a long title shorten */
+.queue-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.queue-main:hover .queue-title {
+  color: var(--primary);
+}
+
+.queue-main:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 0;
+}
+
+.queue-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.queue-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.queue-sub {
+  overflow-wrap: anywhere;
+}
+
+.error-text {
+  color: var(--error);
+}
+
+.queue-bar {
+  display: block;
+  margin-top: 6px;
+}
+
+.queue-bar .bar-fill {
+  display: block;
+}
+
+/* the state at a glance: moving (a spinning ring), waiting (hollow), done, failed, cancelled */
+.queue-dot {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-top: 5px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+}
+
+.queue-moving {
+  border-color: var(--border);
+  border-top-color: var(--primary);
+  animation: spin 0.8s linear infinite;
+}
+
+.queue-queued {
+  border-style: dashed;
+  border-color: var(--muted);
+}
+
+.queue-done {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.queue-error {
+  background: var(--error);
+  border-color: var(--error);
+}
+
+.queue-cancelled {
+  border-color: var(--muted);
+  background: var(--border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queue-moving {
+    animation: none;
+    border-color: var(--primary);
+  }
+}
+
 .status .error {
   margin: 0 0 12px;
 }

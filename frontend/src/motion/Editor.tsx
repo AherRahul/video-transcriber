@@ -252,8 +252,6 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
   const narrated = bundle.scenes.filter((s) => s.narration && s.kind !== "endscreen");
   const voicedCount = narrated.filter((s) => s.voiced).length;
   const destination = destinationOf(view);
-  // places Claude's draft left for the user's own words, while the script waits for them
-  const waitingSlots = (view.script?.slots ?? []).reduce((n, x) => n + x.asks.length, 0);
 
   /** Moves the selection to the scene before or after this one (the preview follows). */
   const stepScene = (delta: number) => {
@@ -501,18 +499,6 @@ export default function Editor({ projectId, health, onBack, onOpen }: Props) {
           {error}{" "}
           <button type="button" className="linkish" onClick={() => setError(null)}>
             Dismiss
-          </button>
-        </div>
-      ) : null}
-      {view.script?.waiting && view.script.narrated && !running ? (
-        <div className="banner banner-warn mo-banner mo-words-banner" role="status">
-          <span>
-            Your turn: Claude's draft is ready for your own words
-            {waitingSlots ? ` (${waitingSlots} place${waitingSlots === 1 ? "" : "s"} for your story, opinions and numbers)` : ""}. Claude builds the scenes once you
-            approve it.
-          </span>
-          <button type="button" className="btn btn-small" onClick={() => (setScriptTab("words"), setScriptOpen(true))}>
-            Open Your words
           </button>
         </div>
       ) : null}

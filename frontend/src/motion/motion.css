@@ -1353,6 +1353,67 @@
   font-size: 0.9rem;
 }
 
+/* the playback speed and the free voice's voice: small menus beside the transport's buttons */
+.mo-transport select.mo-speed,
+.mo-transport select.mo-voice-pick {
+  width: auto;
+  padding: 5px 8px;
+  font-size: 0.85rem;
+  border-radius: 8px;
+}
+
+.mo-transport select.mo-voice-pick {
+  max-width: 220px;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+
+/* ── listen to the script (the Script dialog) ─────────────────────────── */
+
+.mo-listen {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.mo-listen > .btn-small {
+  align-self: center;
+}
+
+.mo-listen-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  min-width: 0;
+}
+
+.mo-listen-field select {
+  width: auto;
+  padding: 5px 8px;
+  font-size: 0.85rem;
+  max-width: 230px;
+  min-width: 0;
+}
+
+.mo-listen-voice select {
+  max-width: 260px;
+}
+
+.mo-listen-now {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .mo-scene-now {
   font-size: 0.85rem;
   min-width: 0;
@@ -2668,6 +2729,15 @@ input.bad {
   background: var(--ok-soft);
   color: var(--ok);
   font-weight: 600;
+}
+
+/* an export waiting or running on this video (the percentage counts up while the library is open) */
+.mo-tag.busy {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .mo-tag.dim {

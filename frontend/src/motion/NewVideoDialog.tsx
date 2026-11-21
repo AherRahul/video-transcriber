@@ -37,9 +37,8 @@ export type NewVideoChoice = {
   episode: number;
   section: string;
   tone: Tone;
-  /** null: the topic decides (Claude proposes the length and says why) */
+  /** null: the reference's length when there is one, else the topic decides */
   minutes: number | null;
-  wait: boolean;
   notes: string;
 };
 
@@ -54,7 +53,8 @@ const TONE_PROMPT: Record<Tone, string> = {
 const PLACE = { youtube: { name: "YouTube", unit: "episode", group: "playlist" }, udemy: { name: "Udemy", unit: "lecture", group: "course" } } as const;
 
 /** The first message Claude gets, written from the choices: where the video sits and what comes either side,
- *  the tone, the length, the reference, the user's notes, and whether to wait for their words. */
+ *  the tone, the length (the reference's when there is one), the reference and the user's notes. Claude decides
+ *  everything and builds in one go. */
 export function firstMessage(c: NewVideoChoice, ctx: { sourceTitle?: string; screenshots?: boolean } = {}): string {
   const place = PLACE[c.destination];
   const notes = c.notes.trim();
@@ -79,31 +79,31 @@ export function firstMessage(c: NewVideoChoice, ctx: { sourceTitle?: string; scr
   } else {
     lines.push(`- Made for: ${place.name}, not in a ${place.group} yet.`);
   }
-  if (c.destination === "udemy") lines.push("- It's a Udemy lecture: no AlgoInsight, website, prices or platform anywhere, on screen or in the narration.");
+  if (c.destination === "udemy") lines.push("- It's a Udemy lecture: no AlgoInsight, website, prices or platform in the narration or the scenes (the frame's logo card is the only exception).");
   lines.push(`- Tone: ${TONE_PROMPT[c.tone]}.`);
-  lines.push(c.minutes ? `- Length: about ${c.minutes} minute${c.minutes === 1 ? "" : "s"}.` : "- Length: what the topic needs. Propose it with the shape and say why.");
+  lines.push(
+    c.minutes
+      ? `- Length: about ${c.minutes} minute${c.minutes === 1 ? "" : "s"}.`
+      : ctx.sourceTitle
+        ? "- Length: about as long as the attached video (the project state shows the window)."
+        : "- Length: what the topic needs. Pick it with the shape and say why.",
+  );
   if (ctx.sourceTitle) {
     lines.push(
-      "- The attached video is a reference for research only: what viewers ask and what it gets wrong. Don't follow its outline, order, examples or length." +
+      "- The attached video is the reference: cover every point it makes, nothing dropped, in our own words, examples and look." +
         (ctx.screenshots ? " Its screenshots show how it put each idea on screen (view_references); our pages are our own design in the paper look." : ""),
     );
   }
   if (notes) lines.push(`- My notes: ${notes}`);
 
   lines.push("");
-  const shape = c.minutes ? "the shape" : "the shape and length this topic needs";
-  // a Udemy lecture never names AlgoInsight, so its material is just "the lessons and problems"
-  const material = c.destination === "udemy" ? "the lessons and problems to use" : "the AlgoInsight lessons to use";
-  if (c.wait) {
-    lines.push(
-      (notes
-        ? `Ask me only for what my notes leave out (my take, a real story, real numbers or runs, ${material}), and propose ${shape}.`
-        : `First ask me for my own take, a real story, my real numbers or runs and ${material}, and propose ${shape}.`) +
-        " Then draft the script with places for my own words, every fact checked in FACTS.md, and wait for me to rewrite and approve it before you build the scenes.",
-    );
-  } else {
-    lines.push(`Don't wait for me: propose ${shape} in a line, then write the script and build every scene in one go, every fact checked in FACTS.md, with no places left for my words.`);
-  }
+  // with a reference (or a length of the user's) the length is set: Claude picks only the shape
+  const shape = c.minutes || ctx.sourceTitle ? "the shape" : "the shape and length this topic needs";
+  // Claude decides everything (the founder, 2026-11-19): no questions first, no places left for the user's words
+  lines.push(
+    `Decide everything yourself: pick ${shape} in a line, then write the script and build every scene in one go, every fact checked in FACTS.md. ` +
+      "Don't ask me anything and leave no places for my words: write my take and opinions yourself.",
+  );
   const groupDetails = c.collection && !c.collection.meta?.description ? ` and the ${place.group}'s own details (it has none yet)` : "";
   lines.push(
     c.destination === "udemy"
@@ -149,7 +149,6 @@ export default function NewVideoDialog({ source, preset, onCreated, onClose }: P
   const [section, setSection] = useState("");
   const [tone, setTone] = useState<Tone>(preset?.tone ?? "normal");
   const [minutes, setMinutes] = useState("");
-  const [wait, setWait] = useState(true);
   const [notes, setNotes] = useState(preset?.notes ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -204,7 +203,7 @@ export default function NewVideoDialog({ source, preset, onCreated, onClose }: P
   })();
   // a playlist or course typed in but not created yet still shows in the message as it will be
   const shownCollection: Collection | null = collectionId === NEW && newName.trim() ? { id: NEW, kind: destination, title: newName.trim(), meta: {}, createdAt: 0, videos: [] } : collection;
-  const choice: NewVideoChoice = { title, destination, collection: shownCollection, episode, section, tone, minutes: minutesValue, wait, notes };
+  const choice: NewVideoChoice = { title, destination, collection: shownCollection, episode, section, tone, minutes: minutesValue, notes };
   const message = firstMessage(choice, { sourceTitle: source?.title, screenshots: !!source?.framesJob });
 
   async function create() {
@@ -227,7 +226,6 @@ export default function NewVideoDialog({ source, preset, onCreated, onClose }: P
         tone,
         destination,
         collection: col ? { id: col.id, order: Math.min(episode, (col.videos?.length ?? 0) + 1), ...(destination === "udemy" ? { section: section.trim() || null } : {}) } : null,
-        scriptReview: wait,
         targetSeconds: minutesValue ? Math.round(minutesValue * 60) : undefined,
         sourceText: source?.text,
         sourceTitle: source?.title,
@@ -278,7 +276,7 @@ export default function NewVideoDialog({ source, preset, onCreated, onClose }: P
                 </button>
               ))}
             </div>
-            {destination === "udemy" ? <p className="muted small">A Udemy lecture shows no logo card, web address, promo or end screen, and never names AlgoInsight.</p> : null}
+            {destination === "udemy" ? <p className="muted small">A Udemy lecture carries the AlgoInsight logo card (no tagline), but no web address, promo or end screen, and never names AlgoInsight.</p> : null}
           </div>
 
           <div className="mo-nv-row">
@@ -339,19 +337,11 @@ export default function NewVideoDialog({ source, preset, onCreated, onClose }: P
           <div className="mo-nv-row">
             <label className="mo-field">
               <span className="label">Length (minutes)</span>
-              <input type="number" min={0.5} max={45} step={0.5} value={minutes} placeholder="The topic decides" onChange={(e) => setMinutes(e.target.value)} />
-              <span className="muted small">Empty: Claude proposes the length the topic needs and says why.</span>
+              <input type="number" min={0.5} max={45} step={0.5} value={minutes} placeholder={source ? "As long as the reference" : "The topic decides"} onChange={(e) => setMinutes(e.target.value)} />
+              <span className="muted small">
+                {source ? "Empty: about as long as the reference video, covering everything it covers." : "Empty: Claude picks the length the topic needs and says why."}
+              </span>
             </label>
-            <div className="mo-field">
-              <span className="label">The script</span>
-              <label className="mo-check-row">
-                <input type="checkbox" checked={wait} onChange={(e) => setWait(e.target.checked)} />
-                <span>
-                  <span className="mo-check-title">Wait for my words</span>
-                  <span className="muted small">Claude drafts with places for your story and numbers, and builds after you approve it.</span>
-                </span>
-              </label>
-            </div>
           </div>
 
           <label className="mo-field">

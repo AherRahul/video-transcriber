@@ -3,7 +3,8 @@ Turns a video URL into a transcript.
 
 1. Ask yt-dlp about the video (title, length, captions). No download yet.
 2. If the video has captions, use them: fast, free, and human-written ones are the most accurate.
-3. Otherwise download only the audio and run Whisper on this machine (faster-whisper, CPU).
+3. Otherwise download only the audio and run Whisper on this machine (faster-whisper, CPU). Several videos
+   can do this at once (SPEECH_SLOTS), sharing one model.
 
 Nothing here bypasses logins, DRM or bot checks: such videos fail with a clear message.
 """
@@ -16,6 +17,8 @@ import os
 import re
 import shutil
 import tempfile
+import threading
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -101,7 +104,9 @@ _FRIENDLY_ERRORS = [
     (r"DRM", "This video is DRM-protected, so it can't be transcribed."),
     (r"Unsupported URL", "This URL is not a video page we can read."),
     (r"Video unavailable|This video is unavailable|HTTP Error 404", "This video is unavailable."),
-    (r"getaddrinfo|Name or service not known|timed out|Connection (refused|reset|aborted)", "Could not reach the site. Check the URL and the network."),
+    # WinError 10061 reads "No connection could be made because the target machine actively refused it"
+    (r"getaddrinfo|Name or service not known|timed out|Connection (refused|reset|aborted)|actively refused|No connection could be made",
+     "Could not reach the site. Check the URL and the network."),
 ]
 
 
@@ -289,17 +294,41 @@ def _download_track(fmt: dict) -> list[Segment]:
 # ---------------------------------------------------------------------------------------------
 
 _models: dict[str, object] = {}
+_models_lock = threading.Lock()
 
 WHISPER_MODELS = ["tiny", "base", "small", "medium"]
 DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "small")
 
 
+def _env_int(name: str, default: int, low: int, high: int) -> int:
+    try:
+        return max(low, min(high, int(os.environ.get(name) or default)))
+    except ValueError:
+        return default
+
+
+# Videos turned into text on this computer at the same time, and the CPU threads each one uses. One video
+# on its own leaves most of the CPU idle (Whisper's default is 4 threads, and its beam search waits on small
+# steps that don't spread over more cores), so a queue gets through faster with videos side by side. One
+# model serves them all: num_workers lets that many transcribe() calls run in parallel.
+# Threads: 4 each (Whisper's own default), fewer only when the slots would ask for more threads than the
+# computer has. Measured 2026-11-19 on the i5-13420H (8 cores: 4 fast, 4 efficient; 12 threads): two videos
+# at 6 threads each (12 in all) were slower together than one after the other, since the threads fight over
+# the cores and wait on the slowest one.
+SPEECH_SLOTS = _env_int("TRANSCRIBE_PARALLEL", 2, 1, 4)
+WHISPER_THREADS = _env_int("WHISPER_THREADS", max(2, min(4, (os.cpu_count() or 4) // SPEECH_SLOTS)), 1, 32)
+
+
 def _whisper(model_name: str):
     from faster_whisper import WhisperModel  # imported late: slow to load, not needed for captions
 
-    if model_name not in _models:
-        _models[model_name] = WhisperModel(model_name, device="cpu", compute_type="int8")
-    return _models[model_name]
+    # the lock: two videos starting together would otherwise each load the same model
+    with _models_lock:
+        if model_name not in _models:
+            _models[model_name] = WhisperModel(
+                model_name, device="cpu", compute_type="int8", cpu_threads=WHISPER_THREADS, num_workers=SPEECH_SLOTS
+            )
+        return _models[model_name]
 
 
 def download_audio(url: str, folder: Path, progress: Progress) -> Path:
@@ -387,18 +416,27 @@ def transcribe_url(
     model: str = DEFAULT_MODEL,
     force_whisper: bool = False,
     progress: Progress = _noop,
+    gate: Callable[[str], AbstractContextManager] | None = None,
+    on_info: Callable[[str, float | None], None] | None = None,
 ) -> Transcript:
+    """gate("download") and gate("speech") hold the audio download and the speech-to-text: the app passes its
+    limits there, so several videos run side by side without too many downloads or Whisper runs at once (a
+    video with captions needs neither and never waits). on_info(title, length) is told the video's title as
+    soon as it is known, before the slow part."""
     url = url.strip()
     if not re.match(r"^https?://", url, re.IGNORECASE):
         raise TranscriptError("Enter a full video URL, starting with http:// or https://.")
     if model not in WHISPER_MODELS:
         raise TranscriptError(f"Unknown speech model: {model}.")
+    hold = gate or (lambda _stage: nullcontext())
 
     progress("info", None, "Reading the video")
     info = fetch_info(url)
     title = info.get("title") or url
     duration = info.get("duration")
     page_url = info.get("webpage_url") or url
+    if on_info:
+        on_info(title, duration)
 
     if info.get("is_live"):
         raise TranscriptError("This is a live stream. Try again once it has ended.")
@@ -412,8 +450,10 @@ def transcribe_url(
 
     folder = Path(tempfile.mkdtemp(prefix="vt-"))
     try:
-        audio = download_audio(page_url, folder, progress)
-        lang, segments = run_whisper(audio, model, language, progress)
+        with hold("download"):
+            audio = download_audio(page_url, folder, progress)
+        with hold("speech"):
+            lang, segments = run_whisper(audio, model, language, progress)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
     if not segments:

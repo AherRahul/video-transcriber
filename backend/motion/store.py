@@ -16,9 +16,9 @@ motion-data/
                           posters and the rendered thumbnail (thumbnail-<hash>.jpg)
     voice/<hash>.mp3|json narration clips (content-addressed) with the time of every character
     docs/<name>.md        documents Claude writes for the user (facts, notes; older videos have a YOUTUBE.md)
-    source.json           a timed reference transcript (another video on the topic): research only, for
-                          what viewers ask and what it gets wrong. It never sets the outline, the order,
-                          the examples or the length, and the script may not copy its wording.
+    source.json           a timed reference transcript (another video on the topic): the video covers every
+                          point it makes and runs about as long as it does (2026-11-19); the script may not
+                          copy its wording.
 
 Every write bumps the project's `version`. Each scene also has its own `rev`, so a direct edit made from
 the page is refused (409) when the scene changed underneath it.
@@ -66,9 +66,12 @@ FPS = 30
 TRANSITIONS = ("cut", "fade", "slide-up", "slide-left", "zoom", "wipe", "tear", "turn")
 SCENE_KINDS = ("scene", "endscreen", "promo")
 # Where a video goes, and what that allows. A Udemy film shows no website, URL, price or platform of ours
-# (the film style guide), so the logo card, the web address, the promo and the end screen are all off.
+# (the film style guide), so the web address, the promo and the end screen are all off. It does carry the
+# AlgoInsight logo card (the founder, 2026-11-21: "when video is meant for udemy, then that video will have
+# algoinsight logo card"): the icon and the wordmark only, without the kit's tagline (see bundle).
 DESTINATIONS = ("youtube", "udemy")
 CLOSING_KEYS = ("logo", "url", "promo", "endscreen")
+UDEMY_CLOSING = {"logo": True, "url": False, "promo": False, "endscreen": False}  # fixed: the settings can't change it
 CLOSING_KINDS = ("promo", "endscreen")  # scenes the video's settings add at the end, never Claude
 PROMO_DIR = Path(__file__).resolve().parent / "seed" / "promo"
 THEMES = ("plain", "paper")
@@ -85,9 +88,13 @@ MAX_SNAPSHOTS = 40
 THUMBNAIL_FILE = "thumbnail.html"
 THUMBNAIL_WORDS = 4  # a YouTube thumbnail reads at a glance: one to four very large words
 # A length the user set lands between 90 percent and 150 percent of it: explaining simply takes a little
-# longer. Nothing else sets a length: a reference video's own length doesn't (each video is as long as its
-# topic needs, and Claude's plan says why).
+# longer.
 LENGTH_LOW, LENGTH_HIGH = 0.9, 1.5
+# A video made from a reference (another creator's video, attached as a timed transcript) runs about as long
+# as the reference and covers everything it covers (the founder, 2026-11-19: "a 3 mins original video is
+# created of 10 mins and beyond"): with no length of the user's own, the reference's length is the target,
+# held to 90 to 120 percent of it.
+REF_LOW, REF_HIGH = 0.9, 1.2
 COPY_RUN_WORDS = 8  # this many of the reference's words in a row, in the same order, is copying
 # The shapes a video can take, so each one is built for its topic rather than one template for every
 # video (a channel of look-alike videos reads as mass-produced). Claude names one in its plan with why it
@@ -367,15 +374,15 @@ def destination_of(p: dict) -> str:
 
 def closing_of(p: dict) -> dict:
     """What the video adds around its own scenes. A project from before these settings keeps what it had:
-    the logo and web address on, no promo, and an end screen only if it already has one."""
+    the logo and web address on, no promo, and an end screen only if it already has one. A Udemy video always
+    has the logo card and nothing else, whatever it saved (the ones made before 2026-11-21 saved it off)."""
+    if destination_of(p) == "udemy":
+        return dict(UDEMY_CLOSING)
     saved = p.get("closing") if isinstance(p.get("closing"), dict) else None
     if saved is None:
         has_end = any(s.get("kind") == "endscreen" for s in p.get("scenes", []))
         saved = {"logo": True, "url": True, "promo": False, "endscreen": has_end}
-    out = {k: bool(saved.get(k, k != "promo")) for k in CLOSING_KEYS}
-    if destination_of(p) == "udemy":
-        out = {k: False for k in CLOSING_KEYS}
-    return out
+    return {k: bool(saved.get(k, k != "promo")) for k in CLOSING_KEYS}
 
 
 def length_window(target: float) -> tuple[float, float]:
@@ -920,9 +927,9 @@ class Store:
             "audio": None,
             "settings": {"model": None, "effort": None, "engine": None, **(settings or {})},
             "targetSeconds": round(float(target_seconds), 1) if target_seconds else None,
-            # a narrated script waits for the user's own words before any scene code (Video settings turns it
-            # off); `script.approved` is set when they approve it
-            "scriptReview": True if script_review is None else bool(script_review),
+            # Claude decides everything and builds in one go (the founder, 2026-11-19: no "Your words" step);
+            # the field is kept for older videos, and script_state ignores it
+            "scriptReview": False,
             "script": {"approved": False},
             "tone": tone if tone in TONES else DEFAULT_TONE,
             "pronunciations": [dict(p) for p in DEFAULT_PRONUNCIATIONS],
@@ -934,9 +941,10 @@ class Store:
         }
         if destination == "udemy":
             project["destination"] = "udemy"
-            project["closing"] = {k: False for k in CLOSING_KEYS}
+            project["closing"] = dict(UDEMY_CLOSING)
         if collection:
-            # a playlist or course decides the destination (a Udemy course: no logo, web address or end screen)
+            # a playlist or course decides the destination (a Udemy course: the logo card, but no web address,
+            # promo or end screen)
             self._place(project, collection)
         folder = self.projects_dir / pid
         (folder / "scenes").mkdir(parents=True)
@@ -1064,8 +1072,8 @@ class Store:
                 c = fields["closing"]
                 if not isinstance(c, dict):
                     raise StoreError("closing must be an object like {promo: true}")
-                if destination_of(p) == "udemy" and any(c.get(k) for k in CLOSING_KEYS):
-                    raise StoreError("A Udemy video can't show our logo, web address, promo or end screen. Switch it to YouTube first.")
+                if destination_of(p) == "udemy" and any(k in c and bool(c[k]) != UDEMY_CLOSING[k] for k in CLOSING_KEYS):
+                    raise StoreError("A Udemy video always shows the AlgoInsight logo card, and never our web address, promo or end screen. Switch it to YouTube to change these.")
                 current = closing_of(p)
                 for k in CLOSING_KEYS:
                     if k in c:
@@ -1541,8 +1549,9 @@ class Store:
     # ── the reference and the script's review ──
 
     def set_source(self, pid: str, name: str, text: str) -> dict | None:
-        """Keeps a timed transcript's lines as this video's reference: research only (what viewers ask, what it
-        gets wrong), and the wording the script may not copy. None when it has no times."""
+        """Keeps a timed transcript's lines as this video's reference: what the video covers (all of it), how long
+        it runs (about as long, see length_target), and the wording the script may not copy. None when it has no
+        times."""
         lines = parse_source(text)
         if len(lines) < 3:
             return None
@@ -1580,14 +1589,27 @@ class Store:
         """The asset names that are references (screenshots of the source)."""
         return {r["asset"] for r in p.get("references") or [] if isinstance(r, dict) and r.get("asset")}
 
+    def length_target(self, pid: str, p: dict) -> tuple[float | None, str | None, tuple[float, float] | None]:
+        """The length a video must land on: (seconds, where it comes from, (lowest, highest)).
+        A length the user set wins (90 to 150 percent of it); else a reference's own length (90 to 120 percent:
+        the video covers everything the reference covers in about the same time); else none."""
+        target = p.get("targetSeconds")
+        if target:
+            return target, "user", length_window(target)
+        src = self.get_source(pid)
+        if src and src.get("seconds"):
+            t = float(src["seconds"])
+            return t, "reference", (t * REF_LOW, min(MAX_TOTAL_SECONDS, t * REF_HIGH))
+        return None, None, None
+
     def plan_review(self, pid: str, p: dict | None = None) -> dict:
-        """Where the script stands before any scene code:
-        - the plan: a narrated video that waits for the user's words names its shape and length first, both
-          chosen for its topic;
-        - a length the user set: the video lands between 90 and 150 percent of it (nothing else sets one);
-        - the reference: the narration may not repeat it word for word (a reference is research only).
-        Claude may write scene code only when `problems` is empty and, when the script waits for the user's
-        own words (`waiting`, see script_state), only after they approve it."""
+        """Where the script stands before any scene code (the plan, shape and length, is asked for in the prompt
+        but no longer holds the scenes back: the words step it belonged to is gone):
+        - its length: a length the user set (90 to 150 percent of it), else the reference's own length (90 to
+          120 percent of it; see length_target);
+        - the reference: the narration may not repeat it word for word;
+        - no place left for the user's own words ([[you: ...]]): Claude writes everything itself.
+        Claude may write scene code only when `problems` is empty."""
         p = p or self.get_project(pid)
         self._derive(pid, p)
         # the length is about the video's own scenes, without the promo and the end screen
@@ -1596,22 +1618,34 @@ class Store:
         narrated = [s for s in own if (s.get("narration") or "").strip()]
         problems: list[str] = []
         out: dict = {"total": total, "window": None, "copied": {}, "problems": problems, "waiting": None}
-        if p.get("scriptReview") and narrated and not p.get("plan"):
-            problems.append(
-                "Choose this video's shape and length for its topic first: write_storyboard with plan {shape, why, minutes, lengthWhy}. "
-                "The project state lists the shapes of the user's other videos; don't repeat the latest ones unless this topic needs it."
-            )
-        target = p.get("targetSeconds")
-        if target:
-            lo, hi = length_window(target)
+        target, by, window = self.length_target(pid, p)
+        if target and window and narrated:
+            lo, hi = window
             out["window"] = (lo, hi)
+            whose = "the length the user set" if by == "user" else "the reference's length"
             if total < lo - 0.5:
                 problems.append(
-                    f"The video is {fmt_clock(total)} but the length the user set ({fmt_clock(target)}) needs at least {fmt_clock(lo)}. "
-                    "Add what the topic is still missing (a real example, a real run, a step the viewer needs); never pad."
+                    f"The video is {fmt_clock(total)} but {whose} ({fmt_clock(target)}) needs at least {fmt_clock(lo)}. "
+                    + ("Add what the topic is still missing (a real example, a real run, a step the viewer needs); never pad."
+                       if by == "user" else "Check every point the reference makes is covered; never pad.")
                 )
             elif total > hi + 0.5:
-                problems.append(f"The video is {fmt_clock(total)} but the length the user set ({fmt_clock(target)}) allows at most {fmt_clock(hi)}. Tighten the script.")
+                problems.append(
+                    f"The video is {fmt_clock(total)} but {whose} ({fmt_clock(target)}) allows at most {fmt_clock(hi)}. "
+                    + ("Tighten the script." if by == "user" else
+                       "Tighten it: every point the reference makes, each said once and plainly, in fewer and shorter scenes; "
+                       "drop extra stories, recaps and asides, never one of its points.")
+                )
+        # Claude writes the whole script itself: a place left for the user's words would be read out as it stands
+        left = [(s["id"], vc.slots(s["narration"])) for s in narrated]
+        left = [(sid, asks) for sid, asks in left if asks]
+        if left:
+            n = sum(len(a) for _, a in left)
+            problems.append(
+                f"{n} place{'s' if n != 1 else ''} for the user's own words left ({', '.join(sid for sid, _ in left[:12])}): write each one yourself "
+                "with write_script (the take, the opinion, the line to remember, in the narrator's voice; a story as a worked example with "
+                "someone from the cast, never an invented memory of the user's)."
+            )
         src = self.get_source(pid)
         if src:
             grams = source_grams(src["lines"])
@@ -1645,7 +1679,9 @@ class Store:
             asks = vc.slots(s["narration"])
             if asks:
                 slots.append({"id": s["id"], "name": s.get("name") or s["id"], "asks": asks})
-        review = bool(p.get("scriptReview"))
+        # the words step is gone (the founder, 2026-11-19): no video waits for the user, an older one that had
+        # it switched on included; Claude writes the whole script itself
+        review = False
         approved = bool((p.get("script") or {}).get("approved"))
         unbuilt = any(s.get("status") != "written" for s in own)
         return {
@@ -2308,8 +2344,12 @@ class Store:
         brand["logoUrl"] = f"/api/motion/brand-kits/{kit['id']}/logo?v={v}" if kit.get("logo") and kit.get("id") else None
         brand["iconUrl"] = f"/api/motion/brand-kits/{kit['id']}/icon?v={v}" if kit.get("icon") and kit.get("id") else None
         closing = closing_of(p)
-        brand["showLogo"] = closing["logo"]  # the frame's logo card (off on a Udemy film)
+        brand["showLogo"] = closing["logo"]  # the frame's logo card (always on a Udemy film)
         brand["showUrl"] = closing["url"]  # the frame's web address (off on a Udemy film)
+        if destination_of(p) == "udemy":
+            # the card's icon and wordmark only: the tagline under it ("YOUR MENTOR FROM PREP TO OFFER") sells
+            # the platform, which a Udemy film doesn't
+            brand["tagline"] = ""
         scenes, start = [], 0.0
         for s in p["scenes"]:
             f = d / s["file"]
@@ -2458,7 +2498,7 @@ class Store:
         lines.append(f'aspect: {p["aspect"]} (stage {w} x {h} px), {p.get("fps", FPS)} fps, length now {fmt_clock(total)}')
         closing = closing_of(p)
         if destination_of(p) == "udemy":
-            lines.append("made for: Udemy. No website, URL, price or platform of ours (AlgoInsight) on screen or in the narration; the frame has no logo card or web address, and there is no promo or end screen")
+            lines.append("made for: Udemy. No website, URL, price or platform of ours (AlgoInsight) in the narration or in your scenes; the frame draws the AlgoInsight logo card (icon and name only, no tagline or web address), and there is no promo or end screen")
         else:
             on = [n for k, n in (("logo", "logo card"), ("url", "web address"), ("promo", "AlgoInsight promo"), ("endscreen", "end screen")) if closing[k]]
             lines.append("made for: YouTube; the video's settings add " + (", ".join(on) if on else "nothing") + " (the promo and the end screen are added after your scenes; never plan, write or edit them)")
@@ -2480,9 +2520,16 @@ class Store:
         else:
             lines.append("placement: in no playlist or course (the user can place it in Details)")
         review = self.plan_review(pid, p)
-        if review["window"]:
-            lo, hi = review["window"]
-            lines.append(f'length the user set: {fmt_clock(p["targetSeconds"])}; the whole video must run between {fmt_clock(lo)} and {fmt_clock(hi)}')
+        target, by, window = self.length_target(pid, p)
+        if target and window:
+            lo, hi = window
+            if by == "user":
+                lines.append(f'length the user set: {fmt_clock(target)}; the whole video must run between {fmt_clock(lo)} and {fmt_clock(hi)}')
+            else:
+                lines.append(
+                    f'length: about the reference\'s own {fmt_clock(target)}; the whole video must run between {fmt_clock(lo)} and {fmt_clock(hi)} '
+                    "(at the estimate's pace), covering every point the reference makes"
+                )
         tone = tone_of(p)
         lines.append(f"tone: {tone} ({TONES[tone]}); write the narration in it (see Tone)")
         plan = p.get("plan")
@@ -2499,8 +2546,8 @@ class Store:
         src = self.get_source(pid)
         if src:
             lines.append(
-                f'reference: {src["name"]}, {fmt_clock(src["seconds"])}, {len(src["lines"])} timed lines (research only: what viewers ask, '
-                "what it gets wrong. Never its outline, order, examples or length; read_source reads it)"
+                f'reference: {src["name"]}, {fmt_clock(src["seconds"])}, {len(src["lines"])} timed lines (the video covers every point it '
+                "makes, in about its length, in our own words and look; read_source reads it)"
             )
         refs = p.get("references") or []
         if refs:

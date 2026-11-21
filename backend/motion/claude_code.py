@@ -217,7 +217,15 @@ class ClaudeCodeTurn:
 def _assistant_error(text: str) -> str:
     low = text.lower()
     if "login" in low or "authentication" in low or "api key" in low or "oauth" in low:
-        return "Claude Code isn't logged in on this computer. Open a terminal, run `claude`, log in with your Claude account, then try again (or switch the engine to API key in the Claude menu)."
+        # Usually not a real log-out: the saved sign-in lasts a few hours and renews itself, and a turn that starts
+        # in the minute it lapses fails once (seen 2026-11-20: three failures at 10:11, renewed at 10:18, the next
+        # build fine). So say that, and keep Claude Code's own words: the friendly line used to hide the cause.
+        said = " ".join(text.split())[:300]
+        return (
+            "Claude Code couldn't sign in just now. Its saved sign-in renews itself, so sending the message again in a "
+            "minute usually works. If it keeps failing, open a terminal, run `claude` and log in with your Claude "
+            f"account (or switch the engine to API key in the Claude menu). Claude Code said: {said}"
+        )
     if ("rate" in low and "limit" in low) or "usage limit" in low:
         return "Your Claude plan's usage limit is reached for now. Try again later, or switch the engine to API key in the Claude menu."
     return f"Claude Code: {text}"[:600]

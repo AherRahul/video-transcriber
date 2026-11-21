@@ -83,6 +83,7 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
     clips = bl.Clips(store, hub, find_ffmpeg)  # uploaded b-roll clips, converted in the background
     agent = ag.Agent(store, renderer, hub, exports)
     atexit.register(renderer.shutdown)
+    atexit.register(exports.shutdown)  # the export lanes' browsers
     last_snap: dict[str, tuple[str, float]] = {}  # project -> (what was edited, when), to group quick edits
 
     def busy() -> dict:
@@ -186,7 +187,9 @@ def install(app: FastAPI, dist_dir: Path, find_ffmpeg, references=None) -> None:
 
     @r.get("/projects")
     def list_projects() -> list[dict]:
-        return store.list_projects()
+        # an export waiting or running shows on its card (several run at once, each from its own editor)
+        live = exports.live()
+        return [{**p, "exporting": live[p["id"]]} if p.get("id") in live else p for p in store.list_projects()]
 
     @r.post("/projects")
     def create_project(body: dict = Body(default={})) -> dict:

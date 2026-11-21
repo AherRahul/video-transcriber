@@ -532,12 +532,12 @@ class Agent:
             blocks = [{"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": body}, "title": name}]
             seconds = source_seconds(body)
             if seconds >= 60:
-                # A timed transcript of another video is a reference: research for the topic (what viewers ask,
-                # what it gets wrong). It sets no length and no points to cover, and the script may not copy it.
+                # A timed transcript of another video is the reference: the video covers every point it makes and
+                # runs about as long (the founder, 2026-11-19); the script may not copy its wording.
                 src = self.store.set_source(pid, name, body) if not self.store.get_source(pid) else None
                 note = (
-                    f"{name} is a reference ({fmt_clock(seconds)} by its timestamps): research for the topic only. "
-                    "Never follow its outline, order, examples or length; the outline comes from the user's own experience and material."
+                    f"{name} is the reference ({fmt_clock(seconds)} by its timestamps): cover every point it makes, nothing dropped, "
+                    "in about its length (the project state shows the window), in our own words, examples and look."
                 )
                 if src:
                     note += f" read_source reads its {len(src['lines'])} timed lines."
@@ -803,14 +803,16 @@ class Agent:
             total = sum(x["duration"] for x in p["scenes"])
             words = sum(s.timing(pid, p, x)["words"] for x in p["scenes"])
             msg = f"Script saved for {len(entries)} scene{'s' if len(entries) != 1 else ''}. The video is now about {fmt_clock(total)} ({words:,} spoken words)."
-            if p.get("targetSeconds"):
-                diff = (total - p["targetSeconds"]) / p["targetSeconds"] * 100
-                msg += f" The length the user set is {fmt_clock(p['targetSeconds'])}: {'+' if diff >= 0 else ''}{diff:.0f} percent."
+            target, by, _window = s.length_target(pid, p)
+            if target:
+                diff = (total - target) / target * 100
+                whose = "The length the user set" if by == "user" else "The reference runs"
+                msg += f" {whose} {fmt_clock(target)}: {'+' if diff >= 0 else ''}{diff:.0f} percent."
             elif (p.get("plan") or {}).get("minutes"):
                 msg += f" The plan says about {p['plan']['minutes']:g} min."
             slots = sum(len(vc.slots(x.get("narration") or "")) for x in p["scenes"])
             if slots:
-                msg += f" {slots} place{'s' if slots != 1 else ''} left for the user's own words."
+                msg += f" {slots} place{'s' if slots != 1 else ''} for the user's words still to write yourself."
             if notes:
                 msg += "\nNarration to fix:\n- " + "\n- ".join(notes[:40])
             review = self._review_text(pid)
@@ -829,8 +831,8 @@ class Agent:
                 raise StoreError("INVALID_INPUT: from and to are source times like 1:40.") from None
             rows = [f"[{fmt_clock(ln['t'])}] {ln['text']}" for ln in src["lines"] if lo <= ln["t"] <= hi]
             head = (
-                f"{src['name']} ({fmt_clock(src['seconds'])}), a reference: research for the topic only (what viewers ask, what it "
-                "gets wrong). Don't follow its outline, order, examples or length, and don't reuse its wording."
+                f"{src['name']} ({fmt_clock(src['seconds'])}), the reference: the video covers every point it makes, in about its "
+                "length. Don't reuse its wording (eight or more of its words in a row is refused)."
             )
             return head + "\n" + "\n".join(rows), f"Read the reference ({len(rows)} lines)"
 

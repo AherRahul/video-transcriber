@@ -29,6 +29,16 @@ def tearDownModule():
     shutil.rmtree(TMP, ignore_errors=True)
 
 
+def _wait_for(check, seconds: float = 10.0) -> None:
+    """Waits until check() is true (work handed to a background pool), failing after `seconds`."""
+    end = time.time() + seconds
+    while time.time() < end:
+        if check():
+            return
+        time.sleep(0.02)
+    raise AssertionError("timed out waiting")
+
+
 class ParseCaptions(unittest.TestCase):
     def test_json3(self):
         raw = json.dumps(
@@ -319,6 +329,8 @@ class ScreenshotFailures(unittest.TestCase):
         req = app.JobRequest(url=t.url)
         with mock.patch.object(tr, "transcribe_url", return_value=t), mock.patch.object(shots, "download_video", side_effect=shots.ShotsError("The video could not be downloaded: This video is private.")):
             app._run(job, req)
+            # the screenshots run in their own pool after the transcript: wait for them inside the patch
+            _wait_for(lambda: app._jobs[job]["frames"]["state"] not in ("waiting", "running"))
         try:
             self.assertEqual(app._jobs[job]["state"], "done")
             self.assertIs(app._jobs[job]["transcript"], t)
@@ -359,6 +371,182 @@ class ScreenshotFailures(unittest.TestCase):
         shots.cleanup()
         self.assertFalse(old.exists())
         self.assertTrue(new.exists())
+
+
+class ParallelJobs(unittest.TestCase):
+    """Several videos at once: each step within its own limit, a captioned video never waiting behind the
+    speech-to-text of others, cancels, and the list the page polls. transcribe_url is replaced by a stand-in
+    that takes the same gates the real one does, so nothing is downloaded or transcribed."""
+
+    def setUp(self):
+        import threading
+
+        import app
+
+        self.app = app
+        self.threading = threading
+        self.release = threading.Event()  # holds every stand-in speech step until the test lets go
+        self.lock = threading.Lock()
+        self.inside = 0  # stand-in speech steps running right now
+        self.most = 0
+        self.ids: list[str] = []
+
+    def tearDown(self):
+        self.release.set()
+        for job in self.ids:
+            _wait_for(lambda job=job: self.app._settled(self.app._jobs.get(job) or {"state": "done"}))
+            self.app._jobs.pop(job, None)
+            self.app._cancels.pop(job, None)
+
+    def fake(self, url, *, language=None, model=None, force_whisper=False, progress=None, gate=None, on_info=None):
+        """Captioned links ("/cap") come back at once; the rest hold a speech slot until released."""
+        on_info and on_info(f"Video {url[-1]}", 60.0)
+        if "/cap" in url:
+            return tr.Transcript(f"Video {url[-1]}", url, 60.0, "en", "captions", [tr.Segment(0, 2, "Hi.")])
+        with gate("download"):
+            progress("downloading", 50.0, "Downloading the audio")
+        with gate("speech"):
+            # the stage first, then the count, as the real one does (transcriber.py reports "transcribing" as
+            # soon as it holds the slot): a test that sees the count can then rely on the stage
+            progress("transcribing", 0.0, "Turning speech into text")
+            with self.lock:
+                self.inside += 1
+                self.most = max(self.most, self.inside)
+            try:
+                while not self.release.wait(0.02):
+                    progress("transcribing", 10.0, "Turning speech into text")
+            finally:
+                with self.lock:
+                    self.inside -= 1
+        return tr.Transcript(f"Video {url[-1]}", url, 60.0, "en", "whisper", [tr.Segment(0, 2, "Hi.")])
+
+    def start(self, client, url):
+        job = client.post("/api/jobs", json={"url": url, "screenshots": False}).json()["id"]
+        self.ids.append(job)
+        return job
+
+    def test_speech_runs_side_by_side_within_its_limit(self):
+        from fastapi.testclient import TestClient
+
+        c = TestClient(self.app.app)
+        slots = tr.SPEECH_SLOTS
+        with mock.patch.object(tr, "transcribe_url", self.fake):
+            jobs = [self.start(c, f"https://example.com/v{i}") for i in range(slots + 1)]
+            # every slot fills, and the one more waits, saying what for
+            _wait_for(lambda: self.most == slots and any(self.app._jobs[j]["stage"] == "waiting" for j in jobs))
+            waiting = next(j for j in jobs if self.app._jobs[j]["stage"] == "waiting")
+            self.assertIn("speech-to-text", self.app._jobs[waiting]["message"])
+            # a captioned video added now is done at once, whatever the others are doing
+            quick = self.start(c, "https://example.com/cap9")
+            _wait_for(lambda: self.app._jobs[quick]["state"] == "done")
+            self.assertEqual(self.inside, slots)
+            # the list: newest first, titles known, no transcripts but a summary of the finished one
+            listed = c.get("/api/jobs").json()
+            self.assertEqual(listed[0]["id"], quick)
+            self.assertNotIn("transcript", listed[0])
+            self.assertEqual(listed[0]["summary"]["source"], "captions")
+            self.assertEqual({j["title"] for j in listed if j["id"] in jobs}, {f"Video {i}" for i in range(slots + 1)})
+            self.release.set()
+            _wait_for(lambda: all(self.app._jobs[j]["state"] == "done" for j in jobs))
+        self.assertEqual(self.most, slots)  # never more than the limit at once
+
+    def test_cancel_a_running_and_a_waiting_video(self):
+        from fastapi.testclient import TestClient
+
+        c = TestClient(self.app.app)
+        slots = tr.SPEECH_SLOTS
+        with mock.patch.object(tr, "transcribe_url", self.fake):
+            jobs = [self.start(c, f"https://example.com/v{i}") for i in range(slots + 1)]
+            _wait_for(lambda: self.most == slots and any(self.app._jobs[j]["stage"] == "waiting" for j in jobs))
+            running = next(j for j in jobs if self.app._jobs[j]["stage"] == "transcribing")
+            waiting = next(j for j in jobs if self.app._jobs[j]["stage"] == "waiting")
+            self.assertEqual(c.post(f"/api/jobs/{running}/cancel").json()["state"], "cancelling")
+            c.post(f"/api/jobs/{waiting}/cancel")
+            _wait_for(lambda: self.app._jobs[running]["state"] == "cancelled" and self.app._jobs[waiting]["state"] == "cancelled")
+            # a finished job leaves the list; a running one can't be removed
+            self.assertEqual(c.delete(f"/api/jobs/{running}").status_code, 200)
+            self.assertNotIn(running, [j["id"] for j in c.get("/api/jobs").json()])
+            still = next(j for j in jobs if j not in (running, waiting))
+            self.assertEqual(c.delete(f"/api/jobs/{still}").status_code, 409)
+
+    def test_retry_a_failed_video_in_its_own_row(self):
+        from fastapi.testclient import TestClient
+
+        c = TestClient(self.app.app)
+        calls: list[dict] = []
+
+        def flaky(url, *, language=None, model=None, force_whisper=False, progress=None, gate=None, on_info=None):
+            calls.append({"url": url, "language": language, "model": model, "force_whisper": force_whisper})
+            if len(calls) == 1:  # the first try can't reach the site; the second can
+                raise tr.TranscriptError("Could not reach the site. Check the URL and the network.")
+            return tr.Transcript("Talk", url, 60.0, "en", "captions", [tr.Segment(0, 2, "Hi.")])
+
+        with mock.patch.object(tr, "transcribe_url", flaky):
+            job = c.post("/api/jobs", json={"url": "https://example.com/v1", "language": "hi", "model": "tiny", "forceWhisper": True, "screenshots": False}).json()["id"]
+            self.ids.append(job)
+            _wait_for(lambda: self.app._jobs[job]["state"] == "error")
+            self.assertEqual(c.post(f"/api/jobs/{job}/retry").json(), {"ok": True, "attempts": 2})
+            _wait_for(lambda: self.app._jobs[job]["state"] == "done")
+        listed = {j["id"]: j for j in c.get("/api/jobs").json()}
+        self.assertEqual(listed[job]["attempts"], 2)  # the same row, its tries counted
+        self.assertEqual(calls[1], calls[0])  # asked again exactly as the first time (link, language, model, Whisper)
+        self.assertEqual(calls[1]["language"], "hi")
+
+    def test_retry_every_failed_video_and_refuse_a_running_one(self):
+        from fastapi.testclient import TestClient
+
+        c = TestClient(self.app.app)
+        tries: dict[str, int] = {}
+
+        def fails_once(url, *, language=None, model=None, force_whisper=False, progress=None, gate=None, on_info=None):
+            tries[url] = tries.get(url, 0) + 1
+            if tries[url] == 1:
+                raise tr.TranscriptError("Could not reach the site. Check the URL and the network.")
+            return tr.Transcript("Talk", url, 60.0, "en", "captions", [tr.Segment(0, 2, "Hi.")])
+
+        with mock.patch.object(tr, "transcribe_url", fails_once):
+            jobs = [self.start(c, f"https://example.com/f{i}") for i in range(3)]
+            _wait_for(lambda: all(self.app._jobs[j]["state"] == "error" for j in jobs))
+            self.assertEqual(c.post("/api/jobs/retry-failed").json()["retried"], 3)
+            _wait_for(lambda: all(self.app._jobs[j]["state"] == "done" for j in jobs))
+        with mock.patch.object(tr, "transcribe_url", self.fake):
+            running = self.start(c, "https://example.com/v7")
+            _wait_for(lambda: self.app._jobs[running]["stage"] in ("transcribing", "waiting"))
+            self.assertEqual(c.post(f"/api/jobs/{running}/retry").status_code, 409)  # still running: nothing to retry
+            self.release.set()
+
+    def test_a_stale_worker_stands_down(self):
+        # a job cancelled while waiting and retried at once: its first worker, starting late, must not run it too
+        job = "stale0000001"
+        self.ids.append(job)
+        self.app._jobs[job] = {"id": job, "url": "https://example.com/s", "state": "queued", "stage": "queued", "percent": None, "message": "",
+                               "createdAt": time.time(), "updatedAt": time.time(), "frames": {"state": "off"}, "run": 2}
+        self.app._cancels[job] = self.threading.Event()
+        with mock.patch.object(tr, "transcribe_url", side_effect=AssertionError("a stale worker ran the job")):
+            self.app._run(job, self.app.JobRequest(url="https://example.com/s", screenshots=False), 1)
+        self.assertEqual(self.app._jobs[job]["state"], "queued")  # untouched: the newer try owns it
+        self.app._jobs[job]["state"] = "cancelled"
+
+    def test_the_speech_model_serves_every_slot(self):
+        made = {}
+
+        class FakeModel:
+            def __init__(self, name, **kwargs):
+                made[name] = kwargs
+
+        import sys
+        import types
+
+        fake_module = types.SimpleNamespace(WhisperModel=FakeModel)
+        with mock.patch.dict(sys.modules, {"faster_whisper": fake_module}), mock.patch.dict(tr._models, {}, clear=True):
+            threads = [self.threading.Thread(target=tr._whisper, args=("tiny",)) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(len(made), 1)  # loaded once, however many videos asked at the same moment
+        self.assertEqual(made["tiny"]["num_workers"], tr.SPEECH_SLOTS)
+        self.assertEqual(made["tiny"]["cpu_threads"], tr.WHISPER_THREADS)
 
 
 if __name__ == "__main__":

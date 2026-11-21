@@ -2,8 +2,13 @@
 HTTP API for the transcriber. Runs on this machine only (127.0.0.1).
 
 POST /api/jobs                {url, language?, model?, forceWhisper?, screenshots?}  -> {id}
+GET  /api/jobs                -> every job in memory, newest first, without the transcripts
 GET  /api/jobs/{id}           -> status, progress and, when done, the transcript (and `frames`, how the
                                  screenshots are going)
+POST /api/jobs/{id}/cancel    -> stops a waiting or running transcription
+POST /api/jobs/{id}/retry     -> tries a failed or cancelled one again (same link and options, same row)
+POST /api/jobs/retry-failed   -> tries every failed one again
+DELETE /api/jobs/{id}         -> forgets a finished one (its screenshots stay on disk)
 GET  /api/jobs/{id}/download  ?format=txt|srt|vtt&timestamps=true|false
 GET  /api/jobs/{id}/frames    -> {state, percent, message, items: [{t, url, file, text}]}
 GET  /api/jobs/{id}/frames/{file}  -> one screenshot (JPEG)
@@ -12,10 +17,15 @@ GET  /api/health              -> tools found
 GET  /api/busy                -> work a restart would cut short (dev.py waits for it)
      /api/motion/...           -> Motion: short animated videos made by Claude (see motion/api.py)
 
-Jobs run one at a time in a background thread (Whisper uses every CPU core) and live in memory
-until the server stops. After the transcript, a job takes screenshots of the video (on by default, see
-screenshots.py): the transcript is shown at once while they are taken. They are kept on disk, so they
-outlive the job in memory and a restart.
+Several videos are transcribed at the same time, each on its own worker thread, and live in memory until
+the server stops. The heavy steps have their own limits, so a long video doesn't hold up the rest:
+  - the audio download (a video without captions): DOWNLOAD_SLOTS at once
+  - Whisper on this computer: transcriber.SPEECH_SLOTS at once, sharing one model
+  - the screenshots, after the transcript (on by default, see screenshots.py): SHOT_SLOTS at once, in
+    their own pool, so the next video's transcript never waits for them
+A video with captions needs none of these and is done in seconds even while others run. The transcript
+is shown at once while the screenshots are taken. Those are kept on disk, so they outlive the job in
+memory and a restart.
 """
 
 from __future__ import annotations
@@ -28,6 +38,7 @@ import time
 import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
@@ -50,10 +61,23 @@ motion_api.install(app, _dist, tr.find_ffmpeg, references=shots.load)
 # Screenshots are kept 14 days: older job folders go when the app starts.
 shots.cleanup()
 
-_executor = ThreadPoolExecutor(max_workers=1)
+DOWNLOAD_SLOTS = tr._env_int("TRANSCRIBE_DOWNLOADS", 3, 1, 8)
+SHOT_SLOTS = tr._env_int("TRANSCRIBE_SCREENSHOTS", 2, 1, 4)
+# a job waiting for a slot still holds its thread, so there are threads for every slot and a few more:
+# those read the next videos' details and captions meanwhile (quick network calls, no slot needed)
+ACTIVE_JOBS = DOWNLOAD_SLOTS + tr.SPEECH_SLOTS + 3
+
+_executor = ThreadPoolExecutor(max_workers=ACTIVE_JOBS, thread_name_prefix="transcribe")
+_shots_executor = ThreadPoolExecutor(max_workers=SHOT_SLOTS, thread_name_prefix="screenshots")
+_slots = {"download": threading.BoundedSemaphore(DOWNLOAD_SLOTS), "speech": threading.BoundedSemaphore(tr.SPEECH_SLOTS)}
 _jobs: dict[str, dict] = {}
+_cancels: dict[str, threading.Event] = {}
 _lock = threading.Lock()
 MAX_JOBS = 50
+
+
+class _Cancelled(Exception):
+    """Raised inside a job (from its progress callback or while it waits for a slot) once it is cancelled."""
 
 
 class JobRequest(BaseModel):
@@ -73,10 +97,54 @@ def _update(job_id: str, **fields) -> None:
             job.update(fields, updatedAt=time.time())
 
 
-def _run(job_id: str, req: JobRequest) -> None:
+_WAITING = {
+    "download": "Waiting to download the audio ({n} downloads at once)",
+    "speech": "Waiting for speech-to-text ({n} videos at once)",
+}
+
+
+def _gate(job_id: str, cancel: threading.Event):
+    """transcribe_url's gate: a slot of the step's own limit, taken when one is free. While the job waits, its
+    status says what for; a cancel ends the wait."""
+
+    @contextmanager
+    def hold(stage: str):
+        sem = _slots[stage]
+        if not sem.acquire(blocking=False):
+            n = DOWNLOAD_SLOTS if stage == "download" else tr.SPEECH_SLOTS
+            _update(job_id, state="running", stage="waiting", percent=None, message=_WAITING[stage].format(n=n))
+            while not sem.acquire(timeout=0.5):
+                if cancel.is_set():
+                    raise _Cancelled()
+        try:
+            yield
+        finally:
+            sem.release()
+
+    return hold
+
+
+def _run(job_id: str, req: JobRequest, run: int = 1) -> None:
+    with _lock:
+        job = _jobs.get(job_id)
+        # a newer try of this job was queued (Retry on a job cancelled before its worker started): this one stands down
+        if not job or int(job.get("run") or 1) != run:
+            return
+        cancel = _cancels.get(job_id) or threading.Event()
+    if cancel.is_set():
+        _update(job_id, state="cancelled", stage="cancelled", percent=None, message="Cancelled", frames={"state": "none", "message": "Cancelled."})
+        return
+
     def progress(stage: str, pct: float | None, message: str) -> None:
+        # the cancel lands here: the download's hook and Whisper's loop both call this as they go
+        if cancel.is_set():
+            raise _Cancelled()
         _update(job_id, state="running", stage=stage, percent=None if pct is None else round(pct, 1), message=message)
 
+    def on_info(title: str, duration: float | None) -> None:
+        _update(job_id, title=title, duration=duration)
+
+    no_shots = {"state": "none", "message": "No transcript, so no screenshots."}
     try:
         t = tr.transcribe_url(
             req.url,
@@ -84,33 +152,45 @@ def _run(job_id: str, req: JobRequest) -> None:
             model=req.model,
             force_whisper=req.forceWhisper,
             progress=progress,
+            gate=_gate(job_id, cancel),
+            on_info=on_info,
         )
-    except tr.TranscriptError as err:
-        _update(job_id, state="error", message=str(err), frames={"state": "none", "message": "No transcript, so no screenshots."})
-        return
     except Exception as err:  # noqa: BLE001 - report anything else without crashing the worker
-        _update(job_id, state="error", message=f"Something went wrong: {type(err).__name__}: {err}"[:400], frames={"state": "none", "message": "No transcript, so no screenshots."})
+        if cancel.is_set():  # yt-dlp wraps an error raised in its hook, so the flag decides
+            _update(job_id, state="cancelled", stage="cancelled", percent=None, message="Cancelled", frames={"state": "none", "message": "Cancelled."})
+        elif isinstance(err, tr.TranscriptError):
+            _update(job_id, state="error", message=str(err), frames=no_shots)
+        else:
+            _update(job_id, state="error", message=f"Something went wrong: {type(err).__name__}: {err}"[:400], frames=no_shots)
         return
 
-    # The transcript is done and shown at once. The screenshots follow in this same worker (so the next
-    # video waits for them), with their own progress; whatever goes wrong there, the transcript stays done.
+    # The transcript is done and shown at once. The screenshots follow in their own pool (the next video
+    # doesn't wait for them), with their own progress; whatever goes wrong there, the transcript stays done.
     if not req.screenshots:
-        _update(job_id, state="done", stage="done", percent=100, message="Done", transcript=t)
+        _update(job_id, state="done", stage="done", percent=100, message="Done", transcript=t, title=t.title)
         return
-    _update(job_id, state="done", stage="done", percent=100, message="Done", transcript=t, frames={"state": "running", "percent": 0, "message": "Taking screenshots"})
+    _update(job_id, state="done", stage="done", percent=100, message="Done", transcript=t, title=t.title,
+            frames={"state": "waiting", "percent": None, "message": "Waiting for the screenshots of other videos to finish"})
+    _shots_executor.submit(_screenshots, job_id, t)
 
+
+def _screenshots(job_id: str, t: tr.Transcript) -> None:
     def shot_progress(pct: float | None, message: str) -> None:
         _update(job_id, frames={"state": "running", "percent": None if pct is None else round(pct, 1), "message": message})
 
+    shot_progress(0, "Taking screenshots")
     result = shots.run_for_job(job_id, t, shot_progress)
     _update(job_id, frames={**result, "percent": 100 if result["state"] == "done" else None})
 
 
-def _public(job: dict) -> dict:
+def _public(job: dict, transcript: bool = True) -> dict:
+    """A job as the page gets it. Without the transcript (the list): its title, source and length only."""
     out = {k: v for k, v in job.items() if k != "transcript"}
     t: tr.Transcript | None = job.get("transcript")
-    if t:
+    if t and transcript:
         out["transcript"] = asdict(t)
+    elif t:
+        out["summary"] = {"source": t.source, "language": t.language, "duration": t.duration, "lines": len(t.segments)}
     return out
 
 
@@ -133,6 +213,8 @@ def health() -> dict:
         "ffmpeg": tr.find_ffmpeg() is not None,
         "models": tr.WHISPER_MODELS,
         "defaultModel": tr.DEFAULT_MODEL,
+        # how much runs side by side (the page says so next to the queue)
+        "parallel": {"speech": tr.SPEECH_SLOTS, "downloads": DOWNLOAD_SLOTS, "screenshots": SHOT_SLOTS, "whisperThreads": tr.WHISPER_THREADS},
     }
 
 
@@ -141,24 +223,126 @@ def create_job(req: JobRequest) -> dict:
     job_id = uuid.uuid4().hex[:12]
     now = time.time()
     with _lock:
-        # Keep memory bounded: drop the oldest finished jobs.
-        finished = sorted((j for j in _jobs.values() if j["state"] in ("done", "error")), key=lambda j: j["createdAt"])
+        # Keep memory bounded: drop the oldest finished jobs (never one whose screenshots are still coming).
+        finished = sorted((j for j in _jobs.values() if _settled(j)), key=lambda j: j["createdAt"])
         while len(_jobs) >= MAX_JOBS and finished:
-            _jobs.pop(finished.pop(0)["id"], None)
+            gone = finished.pop(0)["id"]
+            _jobs.pop(gone, None)
+            _cancels.pop(gone, None)
         _jobs[job_id] = {
             "id": job_id,
             "url": req.url.strip(),
+            "title": None,  # the video's title, once it has been read
+            "duration": None,
+            "model": req.model,
             "state": "queued",
             "stage": "queued",
             "percent": None,
-            "message": "Waiting for the previous video to finish",
+            "message": "Waiting for a free worker",
             "createdAt": now,
             "updatedAt": now,
             # the screenshots' own state: off, waiting (for the transcript), running, done or none (with why)
-            "frames": {"state": "waiting", "message": "After the transcript"} if req.screenshots else {"state": "off", "message": "Screenshots were turned off for this video."},
+            "frames": _frames_start(req),
+            # what was asked (language, model, captions or not, screenshots), so Retry asks the same again
+            "request": req.model_dump(),
+            "attempts": 1,
+            "run": 1,  # which try's worker may run it (see _retry)
         }
-    _executor.submit(_run, job_id, req)
+        _cancels[job_id] = threading.Event()
+    _executor.submit(_run, job_id, req, 1)
     return {"id": job_id}
+
+
+def _frames_start(req: JobRequest) -> dict:
+    return {"state": "waiting", "message": "After the transcript"} if req.screenshots else {"state": "off", "message": "Screenshots were turned off for this video."}
+
+
+def _retry(job_id: str) -> None:
+    """Puts a failed or cancelled job back in the queue as it was asked (same link and options), in its own row,
+    counting the tries. The caller holds _lock and has checked it may be retried."""
+    job = _jobs[job_id]
+    asked = job.get("request") or {"url": job["url"], "model": job.get("model") or tr.DEFAULT_MODEL}
+    req = JobRequest(**asked)
+    tries = int(job.get("attempts") or 1) + 1
+    job.pop("transcript", None)
+    job.pop("summary", None)
+    run = int(job.get("run") or 1) + 1
+    job.update(state="queued", stage="queued", percent=None, message=f"Waiting for a free worker (try {tries})", updatedAt=time.time(),
+               attempts=tries, run=run, frames=_frames_start(req))
+    _cancels[job_id] = threading.Event()
+    _executor.submit(_run, job_id, req, run)
+
+
+@app.post("/api/jobs/{job_id}/retry")
+def retry_job(job_id: str) -> dict:
+    """Tries a failed or cancelled transcription again: the same link with the same options, in the same row."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, "No such job (the server may have restarted).")
+        if job["state"] not in ("error", "cancelled"):
+            raise HTTPException(409, "Only a video that failed or was cancelled can be tried again.")
+        _retry(job_id)
+        return {"ok": True, "attempts": job["attempts"]}
+
+
+@app.post("/api/jobs/retry-failed")
+def retry_failed() -> dict:
+    """Tries every failed transcription again (cancelled ones stay cancelled). They queue like new ones, so the
+    download limit still spreads them out."""
+    with _lock:
+        failed = [j["id"] for j in sorted(_jobs.values(), key=lambda j: j["createdAt"]) if j["state"] == "error"]
+        for job_id in failed:
+            _retry(job_id)
+    return {"ok": True, "retried": len(failed)}
+
+
+def _settled(job: dict) -> bool:
+    """Nothing more will happen to this job: the transcript is done, failed or cancelled, and the screenshots
+    aren't waiting or being taken."""
+    return job["state"] in ("done", "error", "cancelled") and (job.get("frames") or {}).get("state") not in ("waiting", "running")
+
+
+@app.get("/api/jobs")
+def list_jobs() -> list[dict]:
+    """Every job in memory, newest first, without the transcripts (the page fetches the one it shows)."""
+    with _lock:
+        jobs = [dict(j) for j in _jobs.values()]
+    return [_public(j, transcript=False) for j in sorted(jobs, key=lambda j: j["createdAt"], reverse=True)]
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict:
+    """Stops a transcription that is waiting or running. Whisper and a download stop at their next step
+    (a second or two); a job still waiting for a worker never starts. The screenshots of a finished
+    transcript are not stopped."""
+    with _lock:
+        job = _jobs.get(job_id)
+        ev = _cancels.get(job_id)
+        if not job:
+            raise HTTPException(404, "No such job (the server may have restarted).")
+        if job["state"] not in ("queued", "running"):
+            return {"ok": True, "state": job["state"]}
+        if ev:
+            ev.set()
+        if job["state"] == "queued":  # it never started: settled at once (the worker will see the flag and skip it)
+            job.update(state="cancelled", stage="cancelled", percent=None, message="Cancelled", updatedAt=time.time(),
+                       frames={"state": "none", "message": "Cancelled."})
+    return {"ok": True, "state": "cancelling"}
+
+
+@app.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str) -> dict:
+    """Forgets a finished job (the list on the page gets shorter). Its screenshots stay on disk for 14 days."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return {"ok": True}
+        if not _settled(job):
+            raise HTTPException(409, "This video is still being transcribed: cancel it first.")
+        _jobs.pop(job_id, None)
+        _cancels.pop(job_id, None)
+    return {"ok": True}
 
 
 def _get(job_id: str) -> dict:
